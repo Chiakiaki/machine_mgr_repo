@@ -1,0 +1,29 @@
+# machine_mgr manifest — one entry per machine, keyed by MAC address.
+# IP addresses are intentionally NOT stored: DHCP reassigns them.
+# Use `./machine_mgr check <mac|name>` to resolve the current address.
+version: 1
+updated: '2026-11-26T05:28:44+00:00'
+machines:
+- mac: aa:9c:26:f6:e3:9f
+  name: unknown-device
+  hostname: ''
+  ssh_user: ''
+  ssh_port: 22
+  os: ''
+  os_version: ''
+  first_seen: '2026-11-26T05:20:42+00:00'
+  last_seen: '2026-11-26T05:28:36+00:00'
+  tags: []
+  notes: auto-discovered by scan; identity unconfirmed
+- mac: cc:5e:f8:07:36:13
+  name: dell
+  hostname: ruoyu-Alienware-m17-R5-AMD
+  ssh_user: ruoyu
+  ssh_port: 22
+  os: ubuntu
+  os_version: Ubuntu 24.04.5 LTS
+  first_seen: '2026-11-26T05:20:42+00:00'
+  last_seen: '2026-11-26T05:28:36+00:00'
+  tags: []
+  notes: Alienware m17 R5 (192.168.5.101 at time of first contact); Ubuntu 24.04.5;
+    SSH key installed 2026-11-26; ~/project created

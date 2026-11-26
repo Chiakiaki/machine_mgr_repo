@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""machine_mgr — find, register and SSH into machines on the local network.
+
+Run `./machine_mgr` for the interactive menu, or `./machine_mgr --help`.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from local_machines.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())
