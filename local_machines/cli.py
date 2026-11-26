@@ -741,6 +741,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--resume-from", default="")
     r.add_argument("--allow-duplicate", action="store_true")
     r = qsub.add_parser("list", help="show the queue")
+    r.add_argument("--refresh", action="store_true",
+                   help="reconcile running entries with the target first")
     r = qsub.add_parser("run", help="drain the queue (one job at a time)")
     r.add_argument("--poll", type=float, default=60.0, help="seconds between checks")
     r.add_argument("--once", action="store_true", help="single scheduling pass, then exit")
@@ -808,7 +810,7 @@ def main(argv: list[str] | None = None) -> int:
                 return job_cli.cmd_queue_add(ctx, args.machine, args.repo, args.job,
                                              args.extra, args.resume_from, args.allow_duplicate)
             if sub == "list":
-                return job_cli.cmd_queue_list(ctx)
+                return job_cli.cmd_queue_list(ctx, refresh=getattr(args, "refresh", False))
             if sub == "run":
                 return job_cli.cmd_queue_run(ctx, args.poll, args.once, args.dry_run)
             if sub == "clear":

@@ -13,7 +13,7 @@ from .reconcile import reconcile
 
 
 def _say(msg: str) -> None:
-    print(f"  {msg}")
+    print(f"  {msg}", flush=True)
 
 
 def plan(ctx, store) -> int:
@@ -44,11 +44,8 @@ def drain(ctx, store, poll: float = 60.0, once: bool = False) -> int:
         with lock.scheduler_lock(lock_path):
             _say(f"queue drain started (poll {poll:.0f}s, lock {lock_path.name}); "
                  f"Ctrl-C stops the scheduler, the running job keeps going")
-            for entry_id, status in reconcile(ctx, store, target_for, verbose=True):
-                _say(f"[{status}] {entry_id}")
-
             while True:
-                for entry_id, status in reconcile(ctx, store, target_for, verbose=True):
+                for entry_id, status in reconcile(ctx, store, target_for, verbose=False):
                     _say(f"[{status}] {entry_id}")
                     if status == model.FAILED:
                         failures += 1

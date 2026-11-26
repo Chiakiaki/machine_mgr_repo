@@ -11,7 +11,7 @@ from .model import QueueEntry
 
 
 def _say(msg: str) -> None:
-    print(f"  {msg}")
+    print(f"  {msg}", flush=True)
 
 
 def _short(text: str, width: int) -> str:

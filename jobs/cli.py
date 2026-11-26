@@ -11,6 +11,15 @@ from .contract import job_id_for
 from .targets import Target, local_repo_path, target_for, with_resume
 
 
+def say(msg: str) -> None:
+    print(f"  {msg}", flush=True)
+
+
+def fail(msg: str) -> int:
+    print(f"  error: {msg}", file=sys.stderr)
+    return 1
+
+
 # ── job subcommands ────────────────────────────────────────────────────────
 
 def cmd_repos(ctx, machine: str) -> int:
