@@ -229,9 +229,15 @@ def cmd_queue_clear(ctx, everything: bool = False) -> int:
     return qcmd.clear(ctx, everything)
 
 
-def cmd_queue_run(ctx, poll: float = 60.0, once: bool = False, dry_run: bool = False) -> int:
+def cmd_queue_run(ctx, poll: float = 60.0, once: bool = False, dry_run: bool = False,
+                  detach: bool = False) -> int:
     from .queue import commands as qcmd
-    return qcmd.run(ctx, poll=poll, once=once, dry_run=dry_run)
+    return qcmd.run(ctx, poll=poll, once=once, dry_run=dry_run, detach=detach)
+
+
+def cmd_queue_status(ctx) -> int:
+    from .queue import commands as qcmd
+    return qcmd.status(ctx)
 
 
 # ── env subcommands ────────────────────────────────────────────────────────

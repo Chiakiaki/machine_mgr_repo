@@ -747,6 +747,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--poll", type=float, default=60.0, help="seconds between checks")
     r.add_argument("--once", action="store_true", help="single scheduling pass, then exit")
     r.add_argument("--dry-run", action="store_true", help="plan only: check readiness, submit nothing")
+    r.add_argument("--detach", action="store_true",
+                   help="run the scheduler as a detached user unit (survives the shell)")
+    r = qsub.add_parser("status", help="is the scheduler alive, and what is left")
     r = qsub.add_parser("clear", help="drop finished entries")
     r.add_argument("--all", action="store_true", help="drop everything, including pending")
 
@@ -812,7 +815,10 @@ def main(argv: list[str] | None = None) -> int:
             if sub == "list":
                 return job_cli.cmd_queue_list(ctx, refresh=getattr(args, "refresh", False))
             if sub == "run":
-                return job_cli.cmd_queue_run(ctx, args.poll, args.once, args.dry_run)
+                return job_cli.cmd_queue_run(ctx, args.poll, args.once, args.dry_run,
+                                             getattr(args, "detach", False))
+            if sub == "status":
+                return job_cli.cmd_queue_status(ctx)
             if sub == "clear":
                 return job_cli.cmd_queue_clear(ctx, args.all)
 

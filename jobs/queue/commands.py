@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 from .. import catalog
 from ..targets import target_for
 from . import model, scheduler
 from .model import QueueEntry
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+UNIT = "machine-mgr-queue"
 
 
 def _say(msg: str) -> None:
@@ -82,7 +88,94 @@ def clear(ctx, everything: bool = False) -> int:
     return 0
 
 
-def run(ctx, poll: float = 60.0, once: bool = False, dry_run: bool = False) -> int:
+def run(ctx, poll: float = 60.0, once: bool = False, dry_run: bool = False,
+        detach: bool = False) -> int:
     if dry_run:
         return scheduler.plan(ctx, ctx.queue)
+    if detach:
+        return detach_scheduler(ctx, poll)
     return scheduler.drain(ctx, ctx.queue, poll=poll, once=once)
+
+
+def detach_scheduler(ctx, poll: float) -> int:
+    """Run the scheduler outside this ssh/shell session.
+
+    A plain `setsid nohup` still dies when the launching session's cgroup is
+    torn down (observed: systemd stopped the dsh subprocess scope and took the
+    scheduler with it, while the remote job kept training). A transient user
+    unit is independent of that scope.
+    """
+    log = Path.home() / ".cache" / "machine_mgr-queue.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    inner = (f"exec ./machine_mgr job queue run --poll {poll:g} "
+             f"> {log} 2>&1")
+    if _have_systemd_run():
+        subprocess.run(["systemctl", "--user", "reset-failed", UNIT],
+                       capture_output=True, text=True)
+        proc = subprocess.run([
+            "systemd-run", "--user", "--unit", UNIT, "--collect",
+            "--working-directory", str(REPO_ROOT),
+            "--", "bash", "-c", inner,
+        ], capture_output=True, text=True)
+        if proc.returncode == 0:
+            _say(f"scheduler started as user unit {UNIT}")
+            _say(f"log      {log}")
+            _say(f"status   systemctl --user status {UNIT}")
+            _say(f"stop     systemctl --user stop {UNIT}")
+            return 0
+        _say(f"systemd-run failed ({proc.stderr.strip()[:160]}) — falling back to nohup")
+    subprocess.Popen(["setsid", "bash", "-c", inner], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _say(f"scheduler started with setsid (log {log})")
+    _say("warning: setsid survives the shell but NOT a session-scope teardown; "
+         "prefer systemd-run where available")
+    return 0
+
+
+def _have_systemd_run() -> bool:
+    from shutil import which
+    if not which("systemd-run") or not which("systemctl"):
+        return False
+    try:
+        proc = subprocess.run(["systemctl", "--user", "is-system-running"],
+                              capture_output=True, text=True, timeout=5)
+        return proc.stdout.strip() in ("running", "degraded")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def status(ctx) -> int:
+    """Report scheduler liveness + queue counts."""
+    store = ctx.queue
+    lock_path = store.path.with_name(store.path.name + ".lock")
+    holder = ""
+    if lock_path.exists():
+        holder = lock_path.read_text().strip()
+    alive = False
+    if holder.startswith("pid "):
+        try:
+            os.kill(int(holder.split()[1]), 0)
+            alive = True
+        except (ValueError, ProcessLookupError, PermissionError):
+            alive = False
+    unit_state = ""
+    try:
+        proc = subprocess.run(["systemctl", "--user", "is-active", UNIT],
+                              capture_output=True, text=True, timeout=5)
+        unit_state = proc.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    pending = len(store.pending())
+    running = len(store.running())
+    _say(f"queue     {len(store.entries)} entries: {pending} pending, {running} running")
+    if alive:
+        _say(f"scheduler running ({holder}, lock {lock_path.name})")
+    else:
+        _say(f"scheduler NOT running (stale lock: {holder or 'none'})")
+        if pending:
+            _say("resume with: ./machine_mgr job queue run --detach")
+    if unit_state:
+        _say(f"systemd unit {UNIT}: {unit_state}")
+    for warning in store.warnings:
+        _say(f"warning: {warning}")
+    return 0 if alive or not pending else 1
