@@ -82,6 +82,28 @@ def list_entries(ctx, refresh: bool = False) -> int:
     return 0
 
 
+def retry(ctx, entry_id: str) -> int:
+    """Put a cancelled/failed/stale entry back into the pending queue."""
+    store = ctx.queue
+    try:
+        entry = store.get(entry_id)
+    except KeyError as exc:
+        _say(f"error: {exc}")
+        return 1
+    if entry.status == model.RUNNING:
+        _say(f"error: {entry.id} is still running; cancel it first")
+        return 1
+    previous = entry.status
+    entry.status = model.PENDING
+    entry.run_id = ""
+    entry.note = f"retried from {previous}"
+    entry.started = ""
+    entry.finished = ""
+    store.save()
+    _say(f"requeued {entry.id} (#{entry.order}) {entry.repo}:{entry.job}")
+    return 0
+
+
 def clear(ctx, everything: bool = False) -> int:
     removed = ctx.queue.clear(only_finished=not everything)
     _say(f"removed {removed} entr{'y' if removed == 1 else 'ies'}")

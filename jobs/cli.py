@@ -224,6 +224,11 @@ def cmd_queue_list(ctx, refresh: bool = False) -> int:
     return qcmd.list_entries(ctx, refresh=refresh)
 
 
+def cmd_queue_retry(ctx, entry_id: str) -> int:
+    from .queue import commands as qcmd
+    return qcmd.retry(ctx, entry_id)
+
+
 def cmd_queue_clear(ctx, everything: bool = False) -> int:
     from .queue import commands as qcmd
     return qcmd.clear(ctx, everything)

@@ -202,7 +202,8 @@ eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
 ## One view: local and remote machines
 
 `list`, `check`, `probe`, `mkdir`, `ssh` and `job …` treat this host like any
-other machine. The only difference is a per-record field:
+other machine. The only difference is a field that lives in **this host's
+overlay** (`data/machines.yaml`), never in the tracked inventory:
 
 ```yaml
 backend: local    # commands run here, no ssh, no credentials
@@ -223,63 +224,41 @@ A host never sees its own MAC in the ARP table, so `scan` cannot find "me"; the
 catalog, launcher, tracker, preflight and the queue speak one backend interface,
 implemented by `jobs/backend.py` (local) and `jobs/transport.py` (ssh).
 
-## Bootstrapping a new machine's inventory
+## Two-layer inventory
 
-`data/machines.yaml` stays **per-machine and git-ignored** on purpose: it is
-mutated by ordinary commands (`scan --register`, `check`, `probe`,
-`self --register`) and it embeds host-relative fields such as `backend: local`,
-so tracking it would produce merge churn and could make one host believe another
-host is itself. It is also private data (MAC addresses, hostnames).
+The fleet view is built from two files with different lifetimes:
 
-To give a new machine an initial fleet view, push the inventory once:
+| File | Tracked | Holds | Written by |
+| --- | --- | --- | --- |
+| `inventory.yaml` | **yes** | curated identity and reachability: `mac, name, hostname, ssh_user, ssh_port, project_root, os, notes` — no timestamps, no `backend` | you, or `register <mac> --shared` |
+| `data/machines.yaml` | no (per host) | local facts: which record is *this* host (`backend: local`), `last_seen`, and host-specific overrides of `ssh_user`/`ssh_port`/`project_root` | `self --register`, `scan --register`, `check`, `probe` |
+
+`machine_mgr` reads the merged view (curated identity wins; the overlay may
+override reachability only). That gives:
+
+- **new machines see the fleet immediately** — clone the repo and `inventory.yaml`
+  is already there, no bootstrap step;
+- **no churn** — `check`/`scan`/`probe` write only the overlay, so the tracked
+  file changes only when a human curates it;
+- **no cross-host confusion** — `backend: local` lives in each host's overlay, so
+  one machine can never be told it is another.
+
+Adding a machine permanently:
 
 ```bash
-# on an existing host, after redeploy.sh has cloned machine_mgr_repo there
-./machine_mgr inventory push <new-machine>    # merge this host's list into theirs
-./machine_mgr inventory pull <new-machine>    # merge theirs into this one
+./machine_mgr scan --register                  # local overlay: discovery + auto names
+./machine_mgr register <mac> --name lab-box --user trainer --shared   # curated, for git
+git add inventory.yaml && git commit -m "inventory: add lab-box" && git push
 ```
 
-Merging is MAC-keyed and non-destructive: unknown machines are added, empty
-fields are filled, existing values are never overwritten (differences are
-reported as conflicts), and nothing is ever deleted. `backend` is not copied —
-it is re-derived on the receiving host, so "local" always means "this host".
+MAC-keyed everywhere: `scan --register` never duplicates an existing row, and
+re-registering a MAC updates it in place.
 
-## Inventory (per-machine state)
+## Known hosts file
 
-`data/machines.yaml` is **local state** and git-ignored: each machine keeps its
-own view (its own ssh users, paths and self entry). `inventory.example.yaml`
-documents the format.
-
-> **Upgrading a host that tracked the manifest:** if `git pull` refuses with
-> "local changes would be overwritten", keep your state across the migration:
->
-> ```bash
-> cp data/machines.yaml /tmp/machines.state.yaml
-> git checkout -- data/machines.yaml && git pull --ff-only
-> cp /tmp/machines.state.yaml data/machines.yaml
-> ./machine_mgr self --register
-> ```
-
-One entry per machine, keyed by MAC:
-
-```yaml
-version: 1
-updated: '2026-11-26T05:40:00+00:00'
-machines:
-- mac: cc:5e:f8:07:36:13
-  name: alienware-m17
-  hostname: ruoyu-Alienware-m17-R5-AMD
-  ssh_user: sry
-  ssh_port: 22
-  os: ubuntu
-  os_version: 'Ubuntu 24.04.3 LTS'
-  first_seen: '2026-11-26T05:31:12+00:00'
-  last_seen: '2026-11-26T05:45:03+00:00'
-  tags: []
-  notes: ''
-```
-
-There is deliberately **no `ip` field**. `check`/`ssh` resolve it on demand.
+`data/machines.yaml` used to be the single manifest. Hosts upgrading from that
+layout should keep their file — it is read as the per-host overlay — and only
+`git checkout -- data/machines.yaml` if a pull complains about local changes.
 
 ## Hosts behind a VPN / proxy (e.g. Clash Verge TUN)
 

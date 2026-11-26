@@ -1,12 +1,16 @@
-"""Manifest of known machines, keyed by MAC address.
+"""Two-layer machine inventory.
 
-The manifest deliberately stores **no IP address**: DHCP reassigns leases, so an
-IP is only ever a runtime value obtained from discovery. MAC addresses are
-stable, so they are the primary key.
+Layer 1 — ``inventory.yaml`` (tracked in git)
+    Curated fleet: identity and reachability facts that are true for everyone
+    (mac, name, hostname, ssh_user, ssh_port, project_root, os, tags, notes).
+    Static by design: no timestamps, no ``backend``, so it never churns.
 
-Storage is YAML when PyYAML is available (it usually is) and a minimal built-in
-parser/writer matching this exact schema otherwise, so the CLI never hard-fails
-just because PyYAML is missing.
+Layer 2 — ``data/machines.yaml`` (per host, git-ignored)
+    Local facts: which record is *this* host (``backend: local``), when it was
+    last seen, and any host-specific override of a shared field.
+
+The merged view is what every command sees. Writes go to the overlay unless
+``register --shared`` (or ``promote``) explicitly edits the curated layer.
 """
 
 from __future__ import annotations
@@ -16,31 +20,46 @@ import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+try:
+    import yaml as _yaml
+except ImportError:  # pragma: no cover - dependency check
+    raise SystemExit(
+        "machine_mgr needs PyYAML (Debian/Ubuntu: sudo apt install python3-yaml)"
+    ) from None
+
 from .discovery import normalize_mac
 
-try:  # preferred
-    import yaml as _yaml
-except ImportError:  # pragma: no cover - fallback path
-    _yaml = None
+SHARED_FIELDS = ("mac", "name", "hostname", "ssh_user", "ssh_port",
+                 "project_root", "os", "os_version", "tags", "notes")
+# Fields the overlay may override: host-specific reachability, not identity.
+# Curated identity (name, hostname, os, notes…) always wins over a stale
+# overlay value, otherwise an old auto-name would mask the curated one.
+OVERLAY_OVERRIDE_FIELDS = ("ssh_user", "ssh_port", "project_root")
+LOCAL_ONLY_FIELDS = ("backend", "first_seen", "last_seen")
+SCHEMA_FIELDS = SHARED_FIELDS + LOCAL_ONLY_FIELDS
 
-SCHEMA_FIELDS = [
-    "mac", "name", "hostname", "ssh_user", "ssh_port", "project_root", "backend",
-    "os", "os_version", "first_seen", "last_seen", "tags", "notes",
-]
+HEADER_SHARED = (
+    "# Curated machine inventory — tracked in git, shared by every host.\n"
+    "# Static facts only: no timestamps, no per-host state.\n"
+    "# Add with: ./machine_mgr register <mac> ... --shared\n"
+    "# Machines are keyed by MAC; IPs are resolved at call time.\n"
+)
+HEADER_OVERLAY = (
+    "# Per-host overlay — git-ignored. Holds this host's view: which record is\n"
+    "# local, when machines were last seen, and any host-specific override.\n"
+)
 
 
 NAME_MAX = 24
 
 
 def slugify(text: str, *, max_len: int = NAME_MAX) -> str:
-    """Lower-case, hyphen-separated label: 'Ruoyu_Alienware m17' -> 'ruoyu-alienware-m17'."""
-    import re as _re
-    slug = _re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    """Lower-case, hyphen-separated label, cut at a token boundary."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     if not slug:
         return ""
     if len(slug) <= max_len:
         return slug
-    # cut at a token boundary rather than mid-word
     out = ""
     for token in slug.split("-"):
         candidate = f"{out}-{token}" if out else token
@@ -72,16 +91,15 @@ class Machine:
     ssh_user: str = ""
     ssh_port: int = 22
     project_root: str = "~/project"
-    backend: str = "ssh"          # ssh | local
+    backend: str = "ssh"          # overlay-only: ssh | local
     os: str = ""
     os_version: str = ""
-    first_seen: str = ""
-    last_seen: str = ""
+    first_seen: str = ""          # overlay-only
+    last_seen: str = ""           # overlay-only
     tags: list[str] = field(default_factory=list)
     notes: str = ""
 
     def __post_init__(self) -> None:
-        # Normalise here so every construction path (CLI, loader, tests) agrees.
         self.mac = normalize_mac(self.mac)
         self.ssh_port = int(self.ssh_port or 22)
         self.tags = list(self.tags or [])
@@ -101,204 +119,165 @@ class Machine:
     def touch(self) -> None:
         self.last_seen = _now()
 
-    def to_dict(self) -> dict:
-        data = asdict(self)
-        return {k: data[k] for k in SCHEMA_FIELDS}
+    def shared_dict(self) -> dict:
+        return {k: getattr(self, k) for k in SHARED_FIELDS}
+
+    def overlay_dict(self) -> dict:
+        return {k: getattr(self, k) for k in LOCAL_ONLY_FIELDS}
 
 
 class Registry:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.machines: list[Machine] = []
+    def __init__(self, overlay_path: Path, shared_path: Path | None = None) -> None:
+        self.overlay_path = Path(overlay_path)
+        self.shared_path = Path(shared_path) if shared_path else None
+        self.shared: dict[str, Machine] = {}
+        self.overlay: dict[str, Machine] = {}
+        self.warnings: list[str] = []
+        self._shared_dirty = False
         self.load()
 
-    # ── persistence ────────────────────────────────────────────────────────
-    def load(self) -> None:
-        if not self.path.exists():
-            self.machines = []
-            return
-        text = self.path.read_text(encoding="utf-8")
-        data = _yaml.safe_load(text) if _yaml else parse_minimal_yaml(text)
-        entries = (data or {}).get("machines") or []
-        machines = []
-        for entry in entries:
-            if not isinstance(entry, dict) or not entry.get("mac"):
+    # ── loading ────────────────────────────────────────────────────────────
+    def _parse(self, path: Path) -> dict[str, Machine]:
+        if not path.exists():
+            return {}
+        try:
+            data = _yaml.safe_load(path.read_text()) or {}
+        except _yaml.YAMLError as exc:
+            self.warnings.append(f"{path.name}: unreadable ({exc})")
+            return {}
+        out: dict[str, Machine] = {}
+        for raw in data.get("machines") or []:
+            if not isinstance(raw, dict) or not raw.get("mac"):
                 continue
             try:
-                entry = {k: v for k, v in entry.items() if k in SCHEMA_FIELDS}
-                entry["mac"] = normalize_mac(str(entry["mac"]))
-                entry["tags"] = list(entry.get("tags") or [])
-                entry["ssh_port"] = int(entry.get("ssh_port") or 22)
-                machines.append(Machine(**entry))
+                fields = {k: v for k, v in raw.items() if k in SCHEMA_FIELDS}
+                out[normalize_mac(str(raw["mac"]))] = Machine(**fields)
             except (TypeError, ValueError):
                 continue
-        self.machines = machines
+        return out
 
-    HEADER = (
-        "# machine_mgr manifest — one entry per machine, keyed by MAC address.\n"
-        "# IP addresses are intentionally NOT stored: DHCP reassigns them.\n"
-        "# Use `./machine_mgr check <mac|name>` to resolve the current address.\n"
-    )
+    def load(self) -> None:
+        if self.shared_path:
+            self.shared = self._parse(self.shared_path)
+        self.overlay = self._parse(self.overlay_path)
 
-    def dumps(self) -> str:
-        payload = {
-            "version": 1,
-            "updated": _now(),
-            "machines": [m.to_dict() for m in sorted(self.machines, key=lambda m: m.mac)],
-        }
-        body = (_yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-                if _yaml else dump_minimal_yaml(payload))
-        return self.HEADER + body
-
-    def save(self) -> None:
-        payload = {
-            "version": 1,
-            "updated": _now(),
-            "machines": [m.to_dict() for m in sorted(self.machines, key=lambda m: m.mac)],
-        }
-        header = self.HEADER
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if _yaml is not None:
-            body = _yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-        else:  # pragma: no cover - fallback path
-            body = dump_minimal_yaml(payload)
-        self.path.write_text(header + body, encoding="utf-8")
-
-    # ── queries ────────────────────────────────────────────────────────────
-    def find(self, identifier: str) -> Machine:
-        ident = identifier.strip().lower()
-        for m in self.machines:
-            if m.mac == ident:
-                return m
-        for m in self.machines:
-            if m.name.lower() == ident or m.hostname.lower() == ident:
-                return m
-        matches = [m for m in self.machines if m.mac.startswith(ident) or
-                   (m.name and m.name.lower().startswith(ident))]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise KeyError(f"ambiguous machine '{identifier}': " +
-                           ", ".join(m.mac for m in matches))
-        raise KeyError(f"no registered machine matches '{identifier}'")
+    # ── merged view ────────────────────────────────────────────────────────
+    @property
+    def machines(self) -> list[Machine]:
+        merged: dict[str, Machine] = {}
+        for mac, machine in self.shared.items():
+            merged[mac] = Machine(**{k: getattr(machine, k) for k in SCHEMA_FIELDS})
+        for mac, local in self.overlay.items():
+            base = merged.get(mac)
+            if base is None:
+                merged[mac] = Machine(**{k: getattr(local, k) for k in SCHEMA_FIELDS})
+                continue
+            for field_name in SHARED_FIELDS:
+                value = getattr(local, field_name)
+                if field_name not in OVERLAY_OVERRIDE_FIELDS and getattr(base, field_name):
+                    continue          # curated identity wins
+                if isinstance(value, list):
+                    if value:
+                        setattr(base, field_name, value)
+                elif value not in ("", None):
+                    setattr(base, field_name, value)
+            for field_name in LOCAL_ONLY_FIELDS:
+                value = getattr(local, field_name)
+                if value not in ("", None):
+                    setattr(base, field_name, value)
+        return sorted(merged.values(), key=lambda m: m.mac)
 
     def get_by_mac(self, mac: str) -> Machine | None:
         mac = normalize_mac(mac)
         return next((m for m in self.machines if m.mac == mac), None)
 
-    @classmethod
-    def from_text(cls, text: str) -> "Registry":
-        """Parse a manifest document without touching the filesystem."""
-        reg = cls.__new__(cls)
-        reg.path = Path("<memory>")
-        reg.machines = []
-        data = (_yaml.safe_load(text) if _yaml else parse_minimal_yaml(text)) or {}
-        for entry in data.get("machines") or []:
-            if not isinstance(entry, dict) or not entry.get("mac"):
-                continue
-            try:
-                known = {k: v for k, v in entry.items() if k in SCHEMA_FIELDS}
-                known["mac"] = normalize_mac(str(known["mac"]))
-                known["tags"] = list(known.get("tags") or [])
-                known["ssh_port"] = int(known.get("ssh_port") or 22)
-                reg.machines.append(Machine(**known))
-            except (TypeError, ValueError):
-                continue
-        return reg
+    def find(self, identifier: str) -> Machine:
+        ident = identifier.strip().lower()
+        machines = self.machines
+        for machine in machines:
+            if machine.mac == ident:
+                return machine
+        for machine in machines:
+            if machine.name.lower() == ident or machine.hostname.lower() == ident:
+                return machine
+        matches = [m for m in machines
+                   if m.mac.startswith(ident) or (m.name and m.name.lower().startswith(ident))]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise KeyError("ambiguous machine '" + identifier + "': " +
+                           ", ".join(m.mac for m in matches))
+        raise KeyError(f"no registered machine matches '{identifier}'")
 
-    def merge(self, incoming: list["Machine"], *, own_mac: str | None = None) -> dict:
-        """Non-destructive merge keyed on MAC.
-
-        Rules: add unknown machines; fill empty fields; never overwrite a value
-        already present (conflicts are reported); never delete. ``backend`` is
-        host-relative, so it is normalised here instead of being copied.
-        """
-        report = {"added": [], "filled": [], "conflicts": []}
-        for other in incoming:
-            current = self.get_by_mac(other.mac)
-            if current is None:
-                clone = Machine(**{k: getattr(other, k) for k in SCHEMA_FIELDS})
-                clone.backend = "local" if (own_mac and clone.mac == own_mac) else "ssh"
-                self.machines.append(clone)
-                report["added"].append(clone.mac)
-                continue
-            for field in ("name", "hostname", "ssh_user", "project_root",
-                          "os", "os_version", "notes"):
-                mine = getattr(current, field)
-                theirs = getattr(other, field)
-                if not mine and theirs:
-                    setattr(current, field, theirs)
-                    report["filled"].append((current.mac, field))
-                elif mine and theirs and mine != theirs and field != "notes":
-                    report["conflicts"].append((current.mac, field, mine, theirs))
-        return report
-
-    def add(self, machine: Machine) -> Machine:
-        existing = self.get_by_mac(machine.mac)
-        if existing:
+    # ── mutation ───────────────────────────────────────────────────────────
+    def upsert(self, machine: Machine, *, shared: bool = False) -> Machine:
+        """Create or update a record in the overlay (default) or shared layer."""
+        if shared:
+            if self.shared_path is None:
+                raise RuntimeError("no shared inventory configured")
+            existing = self.shared.get(machine.mac) or machine
+            for field_name in SHARED_FIELDS:
+                value = getattr(machine, field_name)
+                if value not in ("", None) and value != []:
+                    setattr(existing, field_name, value)
+            self.shared[machine.mac] = existing
+            self._shared_dirty = True
+            self.save()
             return existing
-        machine.first_seen = machine.first_seen or _now()
-        machine.touch()
-        self.machines.append(machine)
-        return machine
+
+        existing = self.overlay.get(machine.mac) or Machine(mac=machine.mac)
+        for field_name in SCHEMA_FIELDS:
+            value = getattr(machine, field_name)
+            if field_name in LOCAL_ONLY_FIELDS or value not in ("", None, []):
+                setattr(existing, field_name, value)
+        if not existing.first_seen:
+            existing.first_seen = _now()
+        self.overlay[machine.mac] = existing
+        self.save()
+        return existing
+
+    def touch(self, machine: Machine) -> None:
+        """Refresh last_seen in the overlay (shared layer stays static)."""
+        local = self.overlay.get(machine.mac) or Machine(mac=machine.mac)
+        local.last_seen = _now()
+        if not local.first_seen:
+            local.first_seen = _now()
+        self.overlay[machine.mac] = local
+        self.save()
+
+    def promote(self, machine: Machine) -> None:
+        """Copy a machine's static facts into the curated shared inventory."""
+        self.upsert(machine, shared=True)
 
     def remove(self, machine: Machine) -> None:
-        self.machines = [m for m in self.machines if m.mac != machine.mac]
+        self.overlay.pop(machine.mac, None)
+        if machine.mac in self.shared:
+            del self.shared[machine.mac]
+            self._shared_dirty = True
+        self.save()
 
+    # ── persistence ────────────────────────────────────────────────────────
+    def save(self) -> None:
+        self.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        self.overlay_path.write_text(
+            HEADER_OVERLAY + _yaml.safe_dump(
+                {"version": 1, "updated": _now(), "overlay_count": len(self.overlay),
+                 "machines": [asdict(m) for m in sorted(self.overlay.values(), key=lambda m: m.mac)]},
+                sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        if self._shared_dirty and self.shared_path is not None:
+            self.shared_path.write_text(
+                HEADER_SHARED + _yaml.safe_dump(
+                    {"version": 1, "machines": [m.shared_dict() for m in
+                                                sorted(self.shared.values(), key=lambda m: m.mac)]},
+                    sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            self._shared_dirty = False
 
-# ── minimal YAML fallback (only for this manifest's schema) ─────────────────
-
-def _scalar(value: str):
-    v = value.strip()
-    if v in ("", "~", "null"):
-        return ""
-    if v.startswith("[") and v.endswith("]"):
-        inner = v[1:-1].strip()
-        return [s.strip().strip("'\"") for s in inner.split(",") if s.strip()] if inner else []
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-        return v[1:-1]
-    if re.fullmatch(r"-?\d+", v):
-        return int(v)
-    return v
-
-
-def parse_minimal_yaml(text: str) -> dict:  # pragma: no cover - fallback path
-    result: dict = {}
-    current: dict | None = None
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        if re.match(r"^machines:\s*$", line):
-            result["machines"] = []
-            continue
-        m_item = re.match(r"^\s*-\s+([A-Za-z_]+):\s*(.*)$", line)
-        if m_item and "machines" in result:
-            current = {m_item.group(1): _scalar(m_item.group(2))}
-            result["machines"].append(current)
-            continue
-        m_key = re.match(r"^\s+([A-Za-z_]+):\s*(.*)$", line)
-        if m_key and current is not None:
-            current[m_key.group(1)] = _scalar(m_key.group(2))
-            continue
-        m_top = re.match(r"^([A-Za-z_]+):\s*(.*)$", line)
-        if m_top:
-            result[m_top.group(1)] = _scalar(m_top.group(2))
-    return result
-
-
-def dump_minimal_yaml(payload: dict) -> str:  # pragma: no cover - fallback path
-    lines = [f"version: {payload.get('version', 1)}", f"updated: {payload.get('updated', '')}", "machines:"]
-    for m in payload.get("machines", []):
-        first = True
-        for key, value in m.items():
-            if isinstance(value, list):
-                rendered = "[" + ", ".join(str(v) for v in value) + "]"
-            else:
-                rendered = str(value)
-                if not rendered or any(c in rendered for c in ":#-[]{}\"'") or rendered != rendered.strip():
-                    rendered = '"' + rendered.replace('"', '\\"') + '"'
-            prefix = "  - " if first else "    "
-            lines.append(f"{prefix}{key}: {rendered}")
-            first = False
-    return "\n".join(lines) + "\n"
+    def dumps_shared(self) -> str:
+        return HEADER_SHARED + _yaml.safe_dump(
+            {"version": 1, "machines": [m.shared_dict() for m in
+                                        sorted(self.shared.values(), key=lambda m: m.mac)]},
+            sort_keys=False, allow_unicode=True)

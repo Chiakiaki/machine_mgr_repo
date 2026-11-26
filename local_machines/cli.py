@@ -63,7 +63,7 @@ class Context:
         self.runs = RunStore(self.data_dir / "jobs.yaml")
         self.queue = QueueStore(self.data_dir / "queue.yaml")
         self.local_project_root = str(local_project_root or DEFAULT_LOCAL_PROJECT)
-        self.registry = Registry(manifest)
+        self.registry = Registry(manifest, REPO_ROOT / "inventory.yaml")
         self.credentials = ssh_tools.Credentials(DEFAULT_SECRETS)
         self.subnet = subnet
         self.timeout = timeout
@@ -129,8 +129,7 @@ def cmd_self(ctx: Context, register: bool = False) -> int:
         say("use `machine_mgr self --register` to add it to the manifest")
         return 0
 
-    existing = ctx.registry.get_by_mac(mac)
-    machine = existing or ctx.registry.add(Machine(mac=mac))
+    machine = ctx.registry.get_by_mac(mac) or Machine(mac=mac)
     machine.name = machine.name or slugify(info["hostname"])
     machine.hostname = info["hostname"]
     machine.backend = "local"
@@ -138,7 +137,7 @@ def cmd_self(ctx: Context, register: bool = False) -> int:
     machine.os = info["os"] or machine.os
     machine.os_version = info["os_version"] or machine.os_version
     machine.touch()
-    ctx.registry.save()
+    ctx.registry.upsert(machine)
     say(f"registered local machine '{machine.display}' ({machine.mac})")
     return 0
 
@@ -155,14 +154,13 @@ def cmd_scan(ctx: Context, register: bool = False, quiet: bool = False) -> int:
     for mac, ip in result.entries:
         known = ctx.registry.get_by_mac(mac)
         if known and register:
-            known.touch()
+            ctx.registry.touch(known)
         elif register:
-            known = ctx.registry.add(Machine(mac=mac))
-            known.name = auto_name(known, ctx.registry.machines)
+            known = Machine(mac=mac, name=auto_name(Machine(mac=mac), ctx.registry.machines))
+            known = ctx.registry.upsert(known)
         rows.append([known.display if known else "(unregistered)", mac, ip,
                      "known" if known and known.os else ""])
     if register:
-        ctx.registry.save()
         cmd_self(ctx, register=True)
     table(["machine", "mac", "current ip (volatile)", "os"], rows)
     if not register:
@@ -206,10 +204,9 @@ def cmd_check(ctx: Context, identifier: str | None, all_machines: bool) -> int:
         alive = bool(ip)
         if alive:
             online += 1
-            m.touch()
+            ctx.registry.touch(m)
         rows.append([OK if alive else BAD, m.display, m.mac,
                      ip if ip else "-", "online" if alive else "offline"])
-    ctx.registry.save()
     header("Availability")
     table(["", "machine", "mac", "current ip", "state"], rows)
     say(f"{online}/{len(machines)} online  {DIM}(ip is resolved live, never stored){RESET}")
@@ -239,91 +236,15 @@ def cmd_show(ctx: Context, identifier: str) -> int:
     return 0
 
 
-def _self_mac() -> str:
-    info = discovery.self_machine()
-    if info.get("mac"):
-        return info["mac"]
-    import hashlib
-    return "02:00:" + ":".join(
-        f"{b:02x}" for b in hashlib.sha1(info["hostname"].encode()).digest()[:3])
-
-
-def _manifest_path(target) -> str:
-    return f"{target.project_root}/machine_mgr_repo/data/machines.yaml"
-
-
-def _report(kind: str, report: dict) -> None:
-    say(f"{kind}: +{len(report['added'])} added, "
-        f"{len(report['filled'])} fields filled, {len(report['conflicts'])} conflicts")
-    for mac in report["added"]:
-        print(f"     + {mac}")
-    for mac, field in report["filled"]:
-        print(f"     ~ {mac} {field}")
-    for mac, field, mine, theirs in report["conflicts"]:
-        print(f"     ! {mac} {field}: kept {mine!r} (other: {theirs!r})")
-
-
-def cmd_inventory_push(ctx: Context, identifier: str) -> int:
-    """Merge this host's inventory into another machine (one-time bootstrap)."""
-    from jobs.targets import target_for
-    try:
-        target = target_for(ctx, identifier)
-    except (KeyError, RuntimeError) as exc:
-        return fail(str(exc).strip("'"))
-    repo_dir = f"{target.project_root}/machine_mgr_repo"
-    if not target.remote.is_dir(repo_dir):
-        return fail(f"{repo_dir} not found on {identifier}; deploy machine_mgr_repo "
-                    f"there first (redeploy.sh clones it)")
-    path = _manifest_path(target)
-    text = target.remote.read_file(path) if target.remote.exists(path) else ""
-    remote = Registry.from_text(text) if text else Registry(Path("<new>"))
-    # the target's own MAC is host-relative, so ask the target itself
-    try:
-        out = target.remote.run(f"cd {repo_dir} && ./machine_mgr self 2>/dev/null")
-        import re as _re
-        m = _re.search(r"mac\s+([0-9a-f:]{17})", out)
-        own_mac = m.group(1) if m else None
-    except RuntimeError:
-        own_mac = None
-    report = remote.merge(ctx.registry.machines, own_mac=own_mac)
-    target.remote.write_file(path, remote.dumps(), "644")
-    target.remote.try_run(f"cd {repo_dir} && ./machine_mgr self --register >/dev/null 2>&1")
-    _report(f"pushed to {identifier}", report)
-    return 0
-
-
-def cmd_inventory_pull(ctx: Context, identifier: str) -> int:
-    """Merge another machine's inventory into this host."""
-    from jobs.targets import target_for
-    try:
-        target = target_for(ctx, identifier)
-    except (KeyError, RuntimeError) as exc:
-        return fail(str(exc).strip("'"))
-    path = _manifest_path(target)
-    if not target.remote.exists(path):
-        return fail(f"{path} not found on {identifier}")
-    text = target.remote.read_file(path)
-    remote = Registry.from_text(text)
-    report = ctx.registry.merge(remote.machines, own_mac=_self_mac())
-    ctx.registry.save()
-    cmd_self(ctx, register=True)
-    _report(f"pulled from {identifier}", report)
-    return 0
-
-
 def cmd_register(ctx: Context, mac: str, name: str | None, user: str | None,
                  port: int | None, notes: str | None,
-                 password: str | None = None, ask_password: bool = False) -> int:
+                 password: str | None = None, ask_password: bool = False,
+                 shared: bool = False) -> int:
     try:
         mac = normalize_mac(mac)
     except ValueError as exc:
         return fail(str(exc))
-    existing = ctx.registry.get_by_mac(mac)
-    if existing:
-        say(f"{mac} already registered as '{existing.display}'")
-        machine = existing
-    else:
-        machine = ctx.registry.add(Machine(mac=mac))
+    machine = ctx.registry.get_by_mac(mac) or Machine(mac=mac)
     if name:
         machine.name = name
     if user:
@@ -332,7 +253,9 @@ def cmd_register(ctx: Context, mac: str, name: str | None, user: str | None,
         machine.ssh_port = port
     if notes:
         machine.notes = notes
-    ctx.registry.save()
+    ctx.registry.upsert(machine, shared=shared)
+    layer = "shared inventory" if shared else "local overlay"
+    say(f"written to {layer}")
 
     # Optional one-shot credential capture, so later `ssh`/`probe` never prompt.
     cred_user = machine.ssh_user
@@ -364,7 +287,7 @@ def cmd_rename(ctx: Context, identifier: str, new_name: str | None) -> int:
         cleaned = unique_name(cleaned, ctx.registry.machines, ignore_mac=m.mac)
         say(f"'{slugify(new_name)}' taken by {clash.mac}; using '{cleaned}'")
     old, m.name = m.name, cleaned
-    ctx.registry.save()
+    ctx.registry.upsert(m)
     say(f"renamed {m.mac}: '{old or '-'}' -> '{cleaned}'")
     return 0
 
@@ -382,8 +305,8 @@ def cmd_autoname(ctx: Context, identifier: str | None, all_machines: bool) -> in
         if new != m.name:
             say(f"{m.mac}: '{m.name or '-'}' -> '{new}'")
             m.name = new
+            ctx.registry.upsert(m)
             changed += 1
-    ctx.registry.save()
     say(f"{changed} machine(s) renamed")
     return 0
 
@@ -394,7 +317,6 @@ def cmd_forget(ctx: Context, identifier: str) -> int:
     except KeyError as exc:
         return fail(str(exc).strip("'"))
     ctx.registry.remove(m)
-    ctx.registry.save()
     say(f"removed {m.display} ({m.mac})")
     return 0
 
@@ -429,8 +351,8 @@ def cmd_probe(ctx: Context, identifier: str, save: bool = True) -> int:
                 say(f"auto-renamed '{m.name or m.mac}' -> '{new}' (from hostname)")
                 m.name = new
         m.touch()
-        ctx.registry.save()
-        say("manifest updated")
+        ctx.registry.upsert(m)
+        say("inventory updated")
     return 0
 
 
@@ -537,8 +459,10 @@ def cmd_doctor(ctx: Context) -> int:
     except RuntimeError as exc:
         ok = False
         print(f"  {BAD} {'lan interface':16s} {exc}")
-    print(f"  {'  '} {'manifest':16s} {ctx.registry.path} "
-          f"({len(ctx.registry.machines)} machines)")
+    print(f"  {'  '} {'inventory':16s} {ctx.registry.shared_path} "
+          f"({len(ctx.registry.shared)} curated)")
+    print(f"  {'  '} {'overlay':16s} {ctx.registry.overlay_path} "
+          f"({len(ctx.registry.overlay)} local)")
     print(f"  {'  '} {'secrets':16s} {ctx.credentials.path}")
     return 0 if ok else 1
 
@@ -774,6 +698,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("register", help="register a machine by MAC")
     p.add_argument("mac")
+    p.add_argument("--shared", action="store_true",
+                   help="write to the tracked inventory.yaml instead of the local overlay")
     p.add_argument("--name")
     p.add_argument("--user", help="ssh user")
     p.add_argument("--port", type=int)
@@ -862,6 +788,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--detach", action="store_true",
                    help="run the scheduler as a detached user unit (survives the shell)")
     r = qsub.add_parser("status", help="is the scheduler alive, and what is left")
+    r = qsub.add_parser("retry", help="requeue a cancelled/failed entry")
+    r.add_argument("entry")
     r = qsub.add_parser("clear", help="drop finished entries")
     r.add_argument("--all", action="store_true", help="drop everything, including pending")
 
@@ -877,13 +805,6 @@ def build_parser() -> argparse.ArgumentParser:
     q = esub.add_parser("verify", help="run the repo's verify script on the target")
     q.add_argument("machine")
     q.add_argument("repo")
-
-    p = sub.add_parser("inventory", help="bootstrap another host's machine list")
-    isub = p.add_subparsers(dest="inventory_command", required=True)
-    r = isub.add_parser("push", help="merge this host's inventory into another machine")
-    r.add_argument("machine")
-    r = isub.add_parser("pull", help="merge another machine's inventory into this host")
-    r.add_argument("machine")
 
     p = sub.add_parser("self", help="show/register this host as a machine")
     p.add_argument("--register", action="store_true", help="add or update it in the manifest")
@@ -941,6 +862,8 @@ def main(argv: list[str] | None = None) -> int:
                                              getattr(args, "detach", False))
             if sub == "status":
                 return job_cli.cmd_queue_status(ctx)
+            if sub == "retry":
+                return job_cli.cmd_queue_retry(ctx, args.entry)
             if sub == "clear":
                 return job_cli.cmd_queue_clear(ctx, args.all)
 
@@ -961,7 +884,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.password_stdin:
             password = sys.stdin.readline().rstrip("\n")
         return cmd_register(ctx, args.mac, args.name, args.user, args.port, args.notes,
-                            password, args.ask_password or args.password_stdin)
+                            password, args.ask_password or args.password_stdin,
+                            shared=args.shared)
     if args.command == "rename":
         return cmd_rename(ctx, args.machine, args.name)
     if args.command == "autoname":
@@ -979,10 +903,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_key_install(ctx, args.machine)
     if args.command == "password":
         return cmd_password(ctx, args.machine, args.password)
-    if args.command == "inventory":
-        if args.inventory_command == "push":
-            return cmd_inventory_push(ctx, args.machine)
-        return cmd_inventory_pull(ctx, args.machine)
     if args.command == "self":
         return cmd_self(ctx, register=args.register)
     if args.command == "doctor":

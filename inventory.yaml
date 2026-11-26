@@ -1,0 +1,26 @@
+# Curated machine inventory — tracked in git, shared by every host.
+# Static facts only: no timestamps, no per-host state.
+# Add with: ./machine_mgr register <mac> ... --shared
+# Machines are keyed by MAC; IPs are resolved at call time.
+version: 1
+machines:
+- mac: 20:bd:1d:86:f3:30
+  name: sry-legion-y7000-iax10
+  hostname: sry-Legion-Y7000-IAX10
+  ssh_user: sry
+  ssh_port: 22
+  project_root: /home/sry/project
+  os: ubuntu
+  os_version: Ubuntu 24.04.5 LTS
+  tags: []
+  notes: controller laptop (RTX 5060)
+- mac: cc:5e:f8:07:36:13
+  name: alienware-m17
+  hostname: ruoyu-Alienware-m17-R5-AMD
+  ssh_user: ruoyu
+  ssh_port: 22
+  project_root: /home/ruoyu/project
+  os: ubuntu
+  os_version: Ubuntu 24.04.5 LTS
+  tags: []
+  notes: training machine (RTX 3070 Ti)

@@ -59,10 +59,10 @@ def test_machine_is_local_flag():
 def test_registry_roundtrips_backend(tmp_path):
     from local_machines.registry import Registry
     path = tmp_path / "m.yaml"
-    reg = Registry(path)
-    reg.add(Machine(mac="02:00:aa:bb:cc:01", name="me", backend="local"))
+    reg = Registry(path, path.parent / "inventory.yaml")
+    reg.upsert(Machine(mac="02:00:aa:bb:cc:01", name="me", backend="local"))
     reg.save()
-    assert Registry(path).find("me").backend == "local"
+    assert Registry(path, path.parent / "inventory.yaml").find("me").backend == "local"
 
 
 if __name__ == "__main__":

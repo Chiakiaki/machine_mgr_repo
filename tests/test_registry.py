@@ -1,97 +1,122 @@
-"""Manifest round-trip and lookup tests (no network access required)."""
+"""Two-layer inventory: curated shared file + per-host overlay."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from local_machines.registry import Machine, Registry, dump_minimal_yaml, parse_minimal_yaml
+from local_machines.registry import Machine, Registry
+
+LAPTOP = "20:bd:1d:86:f3:30"
+ALIEN = "cc:5e:f8:07:36:13"
 
 
-def test_roundtrip_and_no_ip_persisted(tmp_path):
-    path = tmp_path / "machines.yaml"
-    reg = Registry(path)
-    reg.add(Machine(mac="CC:5E:F8:07:36:13", name="dell", ssh_user="sry"))
-    reg.add(Machine(mac="aa-bb-cc-dd-ee-ff", name="pi"))
-    reg.save()
-
-    text = path.read_text()
-    assert "cc:5e:f8:07:36:13" in text
-    assert "aa:bb:cc:dd:ee:ff" in text
-    assert "ip:" not in text, "the manifest must never persist a DHCP address"
-
-    reloaded = Registry(path)
-    assert len(reloaded.machines) == 2
-    assert reloaded.find("cc:5e:f8:07:36:13").name == "dell"
+def _shared(tmp_path, entries) -> Path:
+    path = tmp_path / "inventory.yaml"
+    path.write_text(yaml.safe_dump({"version": 1, "machines": entries}, sort_keys=False))
+    return path
 
 
-def test_lookup_by_name_prefix_and_ambiguity(tmp_path):
-    path = tmp_path / "machines.yaml"
-    reg = Registry(path)
-    reg.add(Machine(mac="cc:5e:f8:07:36:13", name="dell-ubuntu"))
-    reg.add(Machine(mac="aa:bb:cc:dd:ee:ff", name="pi-node"))
-    reg.save()
+def _registry(tmp_path, shared_entries=()) -> Registry:
+    shared = _shared(tmp_path, list(shared_entries)) if shared_entries else tmp_path / "inventory.yaml"
+    return Registry(tmp_path / "machines.yaml", shared)
 
-    reg = Registry(path)
-    assert reg.find("dell-ubuntu").mac == "cc:5e:f8:07:36:13"
-    assert reg.find("cc:5e").mac == "cc:5e:f8:07:36:13"      # unique mac prefix
-    assert reg.find("pi").name == "pi-node"                  # unique name prefix
+
+def test_shared_entries_are_visible_without_an_overlay(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware", "ssh_user": "ruoyu"}])
+    machine = reg.find("alienware")
+    assert machine.mac == ALIEN
+    assert reg.overlay == {}                      # reading does not create overlay rows
+
+
+def test_overlay_overrides_shared_fields(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware", "ssh_user": "ruoyu"}])
+    reg.upsert(Machine(mac=ALIEN, project_root="/home/ruoyu/project"))   # overlay
+    merged = reg.get_by_mac(ALIEN)
+    assert merged.name == "alienware"             # from shared
+    assert merged.project_root == "/home/ruoyu/project"  # from overlay
+
+
+def test_overlay_only_machine_appears_in_the_view(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware"}])
+    reg.upsert(Machine(mac=LAPTOP, name="laptop", backend="local"))
+    assert {m.mac for m in reg.machines} == {ALIEN, LAPTOP}
+    assert reg.get_by_mac(LAPTOP).backend == "local"
+
+
+def test_upsert_never_creates_duplicates(tmp_path):
+    reg = _registry(tmp_path)
+    reg.upsert(Machine(mac=ALIEN, name="one"))
+    reg.upsert(Machine(mac="CC:5E:F8:07:36:13", name="two"))
+    assert len(reg.machines) == 1
+    assert reg.get_by_mac(ALIEN).name == "two"
+
+
+def test_shared_layer_has_no_local_fields(tmp_path):
+    reg = _registry(tmp_path)
+    reg.upsert(Machine(mac=ALIEN, name="alienware", backend="local"), shared=True)
+    text = (tmp_path / "inventory.yaml").read_text()
+    data = yaml.safe_load(text)
+    entry = data["machines"][0]
+    assert entry["name"] == "alienware"
+    assert "backend" not in entry                  # curated file stays host-neutral
+    assert "last_seen" not in entry
+
+
+def test_touch_updates_overlay_not_shared(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware"}])
+    before = (tmp_path / "inventory.yaml").read_text()
+    reg.touch(reg.find("alienware"))
+    assert (tmp_path / "inventory.yaml").read_text() == before
+    assert reg.get_by_mac(ALIEN).last_seen
+
+
+def test_find_by_name_mac_and_prefix(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware"},
+                               {"mac": LAPTOP, "name": "laptop"}])
+    assert reg.find("alienware").mac == ALIEN
+    assert reg.find("cc:5e").mac == ALIEN
+    assert reg.find("lapt").mac == LAPTOP
     try:
         reg.find("nope")
     except KeyError:
         pass
     else:
-        raise AssertionError("expected KeyError for unknown machine")
+        raise AssertionError("expected KeyError")
 
 
-def test_duplicate_mac_is_idempotent(tmp_path):
-    path = tmp_path / "machines.yaml"
-    reg = Registry(path)
-    first = reg.add(Machine(mac="cc:5e:f8:07:36:13", name="a"))
-    second = reg.add(Machine(mac="CC:5E:F8:07:36:13", name="b"))
-    assert first is second
-    assert len(reg.machines) == 1
+def test_remove_drops_shared_row_too(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware"}])
+    reg.remove(reg.find("alienware"))
+    assert reg.machines == []
+    assert yaml.safe_load((tmp_path / "inventory.yaml").read_text())["machines"] == []
 
 
-def test_remove_and_first_seen(tmp_path):
-    path = tmp_path / "machines.yaml"
-    reg = Registry(path)
-    m = reg.add(Machine(mac="cc:5e:f8:07:36:13"))
-    assert m.first_seen, "first_seen should be stamped on add"
-    reg.remove(m)
-    reg.save()
-    assert Registry(path).machines == []
+def test_corrupt_shared_file_warns_but_still_loads_overlay(tmp_path):
+    shared = tmp_path / "inventory.yaml"
+    shared.write_text("{ nope: [\n")
+    reg = Registry(tmp_path / "machines.yaml", shared)
+    assert reg.warnings
+    reg.upsert(Machine(mac=ALIEN, name="alienware"))
+    assert reg.get_by_mac(ALIEN).name == "alienware"
 
 
-def test_minimal_yaml_fallback_matches_schema():
-    payload = {"version": 1, "updated": "2026-11-26T00:00:00+00:00",
-               "machines": [{"mac": "cc:5e:f8:07:36:13", "name": "dell", "tags": ["ubuntu"]}]}
-    text = dump_minimal_yaml(payload)
-    parsed = parse_minimal_yaml(text)
-    entry = parsed["machines"][0]
-    assert entry["mac"] == "cc:5e:f8:07:36:13"
-    assert entry["name"] == "dell"
-    assert entry["tags"] == ["ubuntu"]
+def test_curated_name_wins_over_stale_overlay_name(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware"}])
+    reg.upsert(Machine(mac=ALIEN, name="host-3613"))      # old auto-name in overlay
+    assert reg.get_by_mac(ALIEN).name == "alienware"
+    assert reg.find("alienware").mac == ALIEN
 
 
-def test_ubuntu_detection():
-    assert Machine(mac="cc:5e:f8:07:36:13", os="ubuntu").is_ubuntu
-    assert Machine(mac="cc:5e:f8:07:36:13", os="debian").is_ubuntu is False
-
-
-if __name__ == "__main__":
-    import tempfile
-
-    failures = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            with tempfile.TemporaryDirectory() as tmp:
-                try:
-                    fn(Path(tmp)) if fn.__code__.co_argcount else fn()
-                    print(f"PASS {name}")
-                except Exception as exc:  # noqa: BLE001
-                    failures += 1
-                    print(f"FAIL {name}: {exc}")
-    raise SystemExit(1 if failures else 0)
+def test_overlay_still_overrides_reachability_fields(tmp_path):
+    reg = _registry(tmp_path, [{"mac": ALIEN, "name": "alienware", "ssh_user": "curated",
+                                "project_root": "/srv/project"}])
+    reg.upsert(Machine(mac=ALIEN, ssh_user="localuser", project_root="/home/local/project"))
+    merged = reg.get_by_mac(ALIEN)
+    assert merged.name == "alienware"
+    assert merged.ssh_user == "localuser"
+    assert merged.project_root == "/home/local/project"
