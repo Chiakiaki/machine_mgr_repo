@@ -223,6 +223,27 @@ A host never sees its own MAC in the ARP table, so `scan` cannot find "me"; the
 catalog, launcher, tracker, preflight and the queue speak one backend interface,
 implemented by `jobs/backend.py` (local) and `jobs/transport.py` (ssh).
 
+## Bootstrapping a new machine's inventory
+
+`data/machines.yaml` stays **per-machine and git-ignored** on purpose: it is
+mutated by ordinary commands (`scan --register`, `check`, `probe`,
+`self --register`) and it embeds host-relative fields such as `backend: local`,
+so tracking it would produce merge churn and could make one host believe another
+host is itself. It is also private data (MAC addresses, hostnames).
+
+To give a new machine an initial fleet view, push the inventory once:
+
+```bash
+# on an existing host, after redeploy.sh has cloned machine_mgr_repo there
+./machine_mgr inventory push <new-machine>    # merge this host's list into theirs
+./machine_mgr inventory pull <new-machine>    # merge theirs into this one
+```
+
+Merging is MAC-keyed and non-destructive: unknown machines are added, empty
+fields are filled, existing values are never overwritten (differences are
+reported as conflicts), and nothing is ever deleted. `backend` is not copied —
+it is re-derived on the receiving host, so "local" always means "this host".
+
 ## Inventory (per-machine state)
 
 `data/machines.yaml` is **local state** and git-ignored: each machine keeps its

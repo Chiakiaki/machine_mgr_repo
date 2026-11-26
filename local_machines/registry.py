@@ -134,17 +134,29 @@ class Registry:
                 continue
         self.machines = machines
 
+    HEADER = (
+        "# machine_mgr manifest — one entry per machine, keyed by MAC address.\n"
+        "# IP addresses are intentionally NOT stored: DHCP reassigns them.\n"
+        "# Use `./machine_mgr check <mac|name>` to resolve the current address.\n"
+    )
+
+    def dumps(self) -> str:
+        payload = {
+            "version": 1,
+            "updated": _now(),
+            "machines": [m.to_dict() for m in sorted(self.machines, key=lambda m: m.mac)],
+        }
+        body = (_yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+                if _yaml else dump_minimal_yaml(payload))
+        return self.HEADER + body
+
     def save(self) -> None:
         payload = {
             "version": 1,
             "updated": _now(),
             "machines": [m.to_dict() for m in sorted(self.machines, key=lambda m: m.mac)],
         }
-        header = (
-            "# machine_mgr manifest — one entry per machine, keyed by MAC address.\n"
-            "# IP addresses are intentionally NOT stored: DHCP reassigns them.\n"
-            "# Use `./machine_mgr check <mac|name>` to resolve the current address.\n"
-        )
+        header = self.HEADER
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if _yaml is not None:
             body = _yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
@@ -173,6 +185,53 @@ class Registry:
     def get_by_mac(self, mac: str) -> Machine | None:
         mac = normalize_mac(mac)
         return next((m for m in self.machines if m.mac == mac), None)
+
+    @classmethod
+    def from_text(cls, text: str) -> "Registry":
+        """Parse a manifest document without touching the filesystem."""
+        reg = cls.__new__(cls)
+        reg.path = Path("<memory>")
+        reg.machines = []
+        data = (_yaml.safe_load(text) if _yaml else parse_minimal_yaml(text)) or {}
+        for entry in data.get("machines") or []:
+            if not isinstance(entry, dict) or not entry.get("mac"):
+                continue
+            try:
+                known = {k: v for k, v in entry.items() if k in SCHEMA_FIELDS}
+                known["mac"] = normalize_mac(str(known["mac"]))
+                known["tags"] = list(known.get("tags") or [])
+                known["ssh_port"] = int(known.get("ssh_port") or 22)
+                reg.machines.append(Machine(**known))
+            except (TypeError, ValueError):
+                continue
+        return reg
+
+    def merge(self, incoming: list["Machine"], *, own_mac: str | None = None) -> dict:
+        """Non-destructive merge keyed on MAC.
+
+        Rules: add unknown machines; fill empty fields; never overwrite a value
+        already present (conflicts are reported); never delete. ``backend`` is
+        host-relative, so it is normalised here instead of being copied.
+        """
+        report = {"added": [], "filled": [], "conflicts": []}
+        for other in incoming:
+            current = self.get_by_mac(other.mac)
+            if current is None:
+                clone = Machine(**{k: getattr(other, k) for k in SCHEMA_FIELDS})
+                clone.backend = "local" if (own_mac and clone.mac == own_mac) else "ssh"
+                self.machines.append(clone)
+                report["added"].append(clone.mac)
+                continue
+            for field in ("name", "hostname", "ssh_user", "project_root",
+                          "os", "os_version", "notes"):
+                mine = getattr(current, field)
+                theirs = getattr(other, field)
+                if not mine and theirs:
+                    setattr(current, field, theirs)
+                    report["filled"].append((current.mac, field))
+                elif mine and theirs and mine != theirs and field != "notes":
+                    report["conflicts"].append((current.mac, field, mine, theirs))
+        return report
 
     def add(self, machine: Machine) -> Machine:
         existing = self.get_by_mac(machine.mac)

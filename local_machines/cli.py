@@ -239,6 +239,78 @@ def cmd_show(ctx: Context, identifier: str) -> int:
     return 0
 
 
+def _self_mac() -> str:
+    info = discovery.self_machine()
+    if info.get("mac"):
+        return info["mac"]
+    import hashlib
+    return "02:00:" + ":".join(
+        f"{b:02x}" for b in hashlib.sha1(info["hostname"].encode()).digest()[:3])
+
+
+def _manifest_path(target) -> str:
+    return f"{target.project_root}/machine_mgr_repo/data/machines.yaml"
+
+
+def _report(kind: str, report: dict) -> None:
+    say(f"{kind}: +{len(report['added'])} added, "
+        f"{len(report['filled'])} fields filled, {len(report['conflicts'])} conflicts")
+    for mac in report["added"]:
+        print(f"     + {mac}")
+    for mac, field in report["filled"]:
+        print(f"     ~ {mac} {field}")
+    for mac, field, mine, theirs in report["conflicts"]:
+        print(f"     ! {mac} {field}: kept {mine!r} (other: {theirs!r})")
+
+
+def cmd_inventory_push(ctx: Context, identifier: str) -> int:
+    """Merge this host's inventory into another machine (one-time bootstrap)."""
+    from jobs.targets import target_for
+    try:
+        target = target_for(ctx, identifier)
+    except (KeyError, RuntimeError) as exc:
+        return fail(str(exc).strip("'"))
+    repo_dir = f"{target.project_root}/machine_mgr_repo"
+    if not target.remote.is_dir(repo_dir):
+        return fail(f"{repo_dir} not found on {identifier}; deploy machine_mgr_repo "
+                    f"there first (redeploy.sh clones it)")
+    path = _manifest_path(target)
+    text = target.remote.read_file(path) if target.remote.exists(path) else ""
+    remote = Registry.from_text(text) if text else Registry(Path("<new>"))
+    # the target's own MAC is host-relative, so ask the target itself
+    try:
+        out = target.remote.run(f"cd {repo_dir} && ./machine_mgr self 2>/dev/null")
+        import re as _re
+        m = _re.search(r"mac\s+([0-9a-f:]{17})", out)
+        own_mac = m.group(1) if m else None
+    except RuntimeError:
+        own_mac = None
+    report = remote.merge(ctx.registry.machines, own_mac=own_mac)
+    target.remote.write_file(path, remote.dumps(), "644")
+    target.remote.try_run(f"cd {repo_dir} && ./machine_mgr self --register >/dev/null 2>&1")
+    _report(f"pushed to {identifier}", report)
+    return 0
+
+
+def cmd_inventory_pull(ctx: Context, identifier: str) -> int:
+    """Merge another machine's inventory into this host."""
+    from jobs.targets import target_for
+    try:
+        target = target_for(ctx, identifier)
+    except (KeyError, RuntimeError) as exc:
+        return fail(str(exc).strip("'"))
+    path = _manifest_path(target)
+    if not target.remote.exists(path):
+        return fail(f"{path} not found on {identifier}")
+    text = target.remote.read_file(path)
+    remote = Registry.from_text(text)
+    report = ctx.registry.merge(remote.machines, own_mac=_self_mac())
+    ctx.registry.save()
+    cmd_self(ctx, register=True)
+    _report(f"pulled from {identifier}", report)
+    return 0
+
+
 def cmd_register(ctx: Context, mac: str, name: str | None, user: str | None,
                  port: int | None, notes: str | None,
                  password: str | None = None, ask_password: bool = False) -> int:
@@ -806,6 +878,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("machine")
     q.add_argument("repo")
 
+    p = sub.add_parser("inventory", help="bootstrap another host's machine list")
+    isub = p.add_subparsers(dest="inventory_command", required=True)
+    r = isub.add_parser("push", help="merge this host's inventory into another machine")
+    r.add_argument("machine")
+    r = isub.add_parser("pull", help="merge another machine's inventory into this host")
+    r.add_argument("machine")
+
     p = sub.add_parser("self", help="show/register this host as a machine")
     p.add_argument("--register", action="store_true", help="add or update it in the manifest")
 
@@ -900,6 +979,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_key_install(ctx, args.machine)
     if args.command == "password":
         return cmd_password(ctx, args.machine, args.password)
+    if args.command == "inventory":
+        if args.inventory_command == "push":
+            return cmd_inventory_push(ctx, args.machine)
+        return cmd_inventory_pull(ctx, args.machine)
     if args.command == "self":
         return cmd_self(ctx, register=args.register)
     if args.command == "doctor":
