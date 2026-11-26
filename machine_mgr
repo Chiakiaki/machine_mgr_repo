@@ -16,4 +16,8 @@ if str(REPO_ROOT) not in sys.path:
 from local_machines.cli import main  # noqa: E402
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:          # e.g. `machine_mgr job queue list | head`
+        import os
+        os._exit(0)

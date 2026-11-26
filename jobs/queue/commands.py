@@ -20,7 +20,24 @@ def _short(text: str, width: int) -> str:
 
 def add(ctx, machine: str, repo: str, job: str, extra: str = "",
         resume_from: str = "", allow_duplicate: bool = False) -> int:
-    entry = QueueEntry(machine=machine, repo=repo, job=job,
+    # Validate here: enqueuing a typo would otherwise fail hours later, when the
+    # scheduler reaches that entry.
+    try:
+        target = target_for(ctx, machine)
+        repo_ref = catalog.resolve_repo(target.remote, target.project_root, repo)
+    except (KeyError, RuntimeError) as exc:
+        _say(f"error: {str(exc).strip(chr(39))}")
+        return 1
+    if job not in repo_ref.jobs:
+        matches = [j for j in repo_ref.jobs if j.endswith(job) or job in j]
+        if len(matches) == 1:
+            job = matches[0]
+        else:
+            hint = "\n      ".join(matches[:8] or repo_ref.jobs[:8])
+            _say(f"error: '{job}' is not a job in {repo_ref.name}. Candidates:\n      {hint}")
+            return 1
+
+    entry = QueueEntry(machine=machine, repo=repo_ref.name, job=job,
                        extra=extra, resume_from=resume_from)
     stored = ctx.queue.add(entry, allow_duplicate=allow_duplicate)
     if stored.id != entry.id:

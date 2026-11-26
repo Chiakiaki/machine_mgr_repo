@@ -84,9 +84,20 @@ def drain(ctx, store, poll: float = 60.0, once: bool = False) -> int:
                     from ..preflight import local_git_state
                     local_repo = local_repo_path(ctx, repo.name)
                     sha = (local_git_state(local_repo) or {}).get("head", "") if local_repo else ""
-                    record = launcher.submit(remote=target.remote, repo=repo, job=entry.job,
-                                             extra=extra, project_root=target.project_root,
-                                             submitter_sha=sha)
+                    try:
+                        record = launcher.submit(remote=target.remote, repo=repo,
+                                                 job=entry.job, extra=extra,
+                                                 project_root=target.project_root,
+                                                 submitter_sha=sha)
+                    except RuntimeError as exc:
+                        entry.status = model.FAILED
+                        entry.note = str(exc)[:300]
+                        entry.finished = _dt.datetime.now().astimezone() \
+                            .isoformat(timespec="seconds")
+                        store.save()
+                        failures += 1
+                        _say(f"[failed] {entry.id}: {entry.note}")
+                        continue
                     record.update({"machine": target.machine.display,
                                    "machine_mac": target.machine.mac})
                     run = ctx.runs.add(tracker.Run(**{
