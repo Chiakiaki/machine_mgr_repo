@@ -133,21 +133,31 @@ def cancel(remote: Remote, run: Run) -> str:
 def fetch(remote: Remote, run: Run, artifact_paths: list[str],
           dest: Path) -> Path:
     """Tar the requested repo-relative paths on the target and extract locally."""
-    if remote.password:
+    # Artifacts are streamed over a plain ssh pipe, so key auth is required;
+    # a *stored* password is fine as long as the key also works.
+    # Only tar paths that actually exist (a declared dir may be empty/absent).
+    probe = " ".join(f"test -e {shlex.quote(p)} && echo {shlex.quote(p)};" for p in artifact_paths)
+    present = remote.run(f"cd {shlex.quote(run.repo_path)} && {probe}").split()
+    if not present:
         raise RuntimeError(
-            "fetch needs key auth (install one with `machine_mgr key-install`); "
-            "password-only hosts cannot stream artifacts"
+            f"none of {', '.join(artifact_paths)} exist on the target for this run"
         )
-    rel = " ".join(shlex.quote(p) for p in artifact_paths)
+    rel = " ".join(shlex.quote(p) for p in present)
     args = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15",
-            "-p", str(remote.port)]
+            "-o", "BatchMode=yes", "-p", str(remote.port)]
     if remote.forward_agent:
         args.append("-A")
     args += [f"{remote.user}@{remote.ip}",
              f"cd {shlex.quote(run.repo_path)} && tar czf - {rel} 2>/dev/null"]
     proc = subprocess.run(args, capture_output=True, timeout=1800)
     if proc.returncode != 0:
-        raise RuntimeError(f"remote tar failed: {proc.stderr.decode(errors='replace').strip()[:300]}")
+        err = proc.stderr.decode(errors="replace").strip()
+        if "Permission denied" in err or "publickey" in err:
+            raise RuntimeError(
+                "artifact fetch needs key auth on the target — run "
+                "`machine_mgr key-install <machine>` once (a stored password is not enough)"
+            )
+        raise RuntimeError(f"remote tar failed: {err[:300]}")
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:gz") as tar:
         tar.extractall(dest, filter="data")  # noqa: S202 - our own remote tree

@@ -41,9 +41,14 @@ class Remote:
             self.ip, self.user, self.port,
             f"cat > {shlex.quote(path)} && chmod {mode} {shlex.quote(path)}",
             password=self.password, timeout=60, forward_agent=self.forward_agent,
+            input_text=content,
         )
         if proc.returncode != 0:
             raise RuntimeError(f"could not write {path}: {(proc.stderr or '').strip()}")
+        # Guard against a silently empty write (e.g. stdin closed too early).
+        code, out, _ = self.try_run(f"wc -c < {shlex.quote(path)}")
+        if code != 0 or int(out.strip() or 0) != len(content.encode()):
+            raise RuntimeError(f"short write to {path}: expected {len(content.encode())} bytes")
 
     def read_file(self, path: str) -> str:
         return self.run(f"cat {shlex.quote(path)}")

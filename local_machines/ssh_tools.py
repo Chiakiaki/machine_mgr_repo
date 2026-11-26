@@ -70,7 +70,7 @@ def _askpass_env(password: str) -> tuple[dict, str]:
 def ssh(ip: str, user: str, port: int = 22, command: str | None = None,
         password: str | None = None, timeout: float = 60.0,
         allocate_tty: bool = False, forward_agent: bool = False,
-        stream: bool = False) -> subprocess.CompletedProcess:
+        stream: bool = False, input_text: str | None = None) -> subprocess.CompletedProcess:
     """Run ``command`` (or open a shell) over SSH.
 
     Returns the CompletedProcess; the caller decides how to treat the code.
@@ -92,16 +92,19 @@ def ssh(ip: str, user: str, port: int = 22, command: str | None = None,
     tmpdir = None
     if password:
         env, tmpdir = _askpass_env(password)
+    kwargs: dict = dict(
+        capture_output=command is not None and not stream,
+        text=True,
+        timeout=timeout,
+        env=env,
+        start_new_session=True,
+    )
+    if input_text is not None:
+        kwargs["input"] = input_text          # subprocess.run feeds stdin itself
+    elif command is not None:
+        kwargs["stdin"] = subprocess.DEVNULL  # never block on a remote prompt
     try:
-        return subprocess.run(
-            args,
-            capture_output=command is not None and not stream,
-            text=True,
-            timeout=timeout,
-            env=env,
-            stdin=subprocess.DEVNULL if command is not None else None,
-            start_new_session=True,
-        )
+        return subprocess.run(args, **kwargs)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"ssh timed out after {timeout:.0f}s ({user}@{ip})") from None
     finally:

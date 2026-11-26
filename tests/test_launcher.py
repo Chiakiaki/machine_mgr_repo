@@ -59,3 +59,13 @@ def test_run_id_is_sortable_and_unique():
     assert a != b
     assert a[:8].isdigit()
     assert "bundle-x" in a or "bundle/x" not in a
+
+
+def test_start_script_backgrounds_in_run_dir():
+    from jobs.launcher import build_start_script
+    script = build_start_script("/home/u/proj/.machine_mgr/runs/r1")
+    # cd must happen in the script, otherwise `cd X && setsid ... &` backgrounds
+    # the whole and-list and $! is a subshell pid.
+    assert "cd /home/u/proj/.machine_mgr/runs/r1 || exit 1" in script
+    assert "setsid bash command.sh > log 2>&1 < /dev/null &" in script
+    assert "echo $! > pid" in script

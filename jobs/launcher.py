@@ -36,6 +36,21 @@ def run_dir_for(repo_path: str, run_id: str) -> str:
     return f"{repo_path}/.machine_mgr/runs/{run_id}"
 
 
+def build_start_script(run_dir: str, shell: str = "bash") -> str:
+    """Starter that backgrounds command.sh and records its pid in the run dir.
+
+    ``cd X && setsid cmd &`` would background the whole and-list, so $! would be
+    a subshell pid and the pid file would land in the wrong directory. Doing the
+    cd here, in a script, keeps $! pointing at the real process.
+    """
+    return (
+        "#!/usr/bin/env bash\n"
+        f"cd {shlex.quote(run_dir)} || exit 1\n"
+        f"setsid {shell} command.sh > log 2>&1 < /dev/null &\n"
+        "echo $! > pid\n"
+    )
+
+
 def build_script(*, repo_path: str, descriptor, values: dict[str, str],
                  run_dir: str, extra: str) -> str:
     """The exact shell script that will run on the target."""
@@ -80,16 +95,13 @@ def submit(*, remote: Remote, repo: RepoRef, job: str, extra: str,
 
     remote.run(f"mkdir -p {shlex.quote(run_dir)}")
     remote.write_file(f"{run_dir}/command.sh", script, mode="755")
+    remote.write_file(f"{run_dir}/start.sh", build_start_script(run_dir, descriptor.runner.shell),
+                      mode="755")
     remote.run(f"cp {shlex.quote(job_abs)} {shlex.quote(run_dir + '/submitted.yaml')}")
     if descriptor.env.name:
         remote.write_file(f"{run_dir}/env_name", descriptor.env.name + "\n")
 
-    shell = descriptor.runner.shell or "bash"
-    start = (
-        f"cd {shlex.quote(run_dir)} && "
-        f"setsid {shell} command.sh > log 2>&1 < /dev/null & "
-        f"echo $! > pid; sleep 1; cat pid"
-    )
+    start = f"bash {shlex.quote(run_dir + '/start.sh')} && sleep 1 && cat {shlex.quote(run_dir + '/pid')}"
     pid = remote.run(start).strip().splitlines()[-1]
 
     return {
