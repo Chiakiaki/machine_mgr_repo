@@ -227,7 +227,19 @@ implemented by `jobs/backend.py` (local) and `jobs/transport.py` (ssh).
 
 `data/machines.yaml` is **local state** and git-ignored: each machine keeps its
 own view (its own ssh users, paths and self entry). `inventory.example.yaml`
-documents the format. One entry per machine, keyed by MAC:
+documents the format.
+
+> **Upgrading a host that tracked the manifest:** if `git pull` refuses with
+> "local changes would be overwritten", keep your state across the migration:
+>
+> ```bash
+> cp data/machines.yaml /tmp/machines.state.yaml
+> git checkout -- data/machines.yaml && git pull --ff-only
+> cp /tmp/machines.state.yaml data/machines.yaml
+> ./machine_mgr self --register
+> ```
+
+One entry per machine, keyed by MAC:
 
 ```yaml
 version: 1
