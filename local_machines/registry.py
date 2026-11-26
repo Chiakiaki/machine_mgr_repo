@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - fallback path
     _yaml = None
 
 SCHEMA_FIELDS = [
-    "mac", "name", "hostname", "ssh_user", "ssh_port", "project_root",
+    "mac", "name", "hostname", "ssh_user", "ssh_port", "project_root", "backend",
     "os", "os_version", "first_seen", "last_seen", "tags", "notes",
 ]
 
@@ -72,6 +72,7 @@ class Machine:
     ssh_user: str = ""
     ssh_port: int = 22
     project_root: str = "~/project"
+    backend: str = "ssh"          # ssh | local
     os: str = ""
     os_version: str = ""
     first_seen: str = ""
@@ -88,6 +89,10 @@ class Machine:
     @property
     def display(self) -> str:
         return self.name or self.hostname or self.mac
+
+    @property
+    def is_local(self) -> bool:
+        return (self.backend or "ssh").lower() == "local"
 
     @property
     def is_ubuntu(self) -> bool:

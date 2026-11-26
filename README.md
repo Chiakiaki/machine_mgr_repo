@@ -163,7 +163,12 @@ no babysitting:
 ./machine_mgr job queue clear              # drop finished entries
 ```
 
-State is persisted in `data/queue.yaml` with atomic writes, a count/sha256
+The queue is **per machine** by design: it is local scheduling intent for that
+host's execution context, so there is nothing to synchronise and no merge
+conflicts; a controller that dies cannot corrupt another machine's queue. Use
+`job status`, `job logs` and `job fetch` to look at runs that happened elsewhere.
+
+State is persisted in `data/queue.yaml` (git-ignored) with atomic writes, a count/sha256
 integrity header and a `.bak` fallback, and only one scheduler may run at a time
 (`flock`). Liveness is judged by pid **plus** the process cmdline, so a job
 killed by OOM or a reboot is marked `stale` instead of blocking the queue
@@ -194,9 +199,35 @@ stored there:
 eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
 ```
 
-## Manifest
+## One view: local and remote machines
 
-`data/machines.yaml`, one entry per machine, keyed by MAC:
+`list`, `check`, `probe`, `mkdir`, `ssh` and `job …` treat this host like any
+other machine. The only difference is a per-record field:
+
+```yaml
+backend: local    # commands run here, no ssh, no credentials
+backend: ssh      # commands run over ssh (default; ssh_user/ssh_port used)
+```
+
+Register this host once — it appears in the same inventory and can receive jobs:
+
+```bash
+./machine_mgr self --register     # detects MAC/IP/hostname/OS, backend: local
+./machine_mgr list                # includes this host next to the remote ones
+./machine_mgr check <this-host>   # online without a LAN scan
+./machine_mgr job submit <this-host> bdp_benchmark <job>   # runs locally
+```
+
+A host never sees its own MAC in the ARP table, so `scan` cannot find "me"; the
+`self` command supplies that entry. Everything above the transport is shared:
+catalog, launcher, tracker, preflight and the queue speak one backend interface,
+implemented by `jobs/backend.py` (local) and `jobs/transport.py` (ssh).
+
+## Inventory (per-machine state)
+
+`data/machines.yaml` is **local state** and git-ignored: each machine keeps its
+own view (its own ssh users, paths and self entry). `inventory.example.yaml`
+documents the format. One entry per machine, keyed by MAC:
 
 ```yaml
 version: 1

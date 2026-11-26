@@ -79,6 +79,8 @@ class Context:
         return self.registry.find(identifier)
 
     def ip_of(self, machine: Machine) -> str | None:
+        if machine.is_local:
+            return "127.0.0.1"
         return discovery.find_by_mac(machine.mac, subnet=self.subnet,
                                      timeout=self.timeout, cache=self.cache)
 
@@ -112,6 +114,35 @@ def is_auto_named(machine: Machine) -> bool:
 
 # ── commands ───────────────────────────────────────────────────────────────
 
+def cmd_self(ctx: Context, register: bool = False) -> int:
+    """Show (and optionally register) this host as a machine."""
+    import hashlib
+    info = discovery.self_machine()
+    mac = info["mac"] or "02:00:" + ":".join(
+        f"{b:02x}" for b in hashlib.sha1(info["hostname"].encode()).digest()[:3])
+    header("This host")
+    for key in ("hostname", "mac", "ip", "os", "os_version"):
+        print(f"  {key:12s} {info.get(key) or '-'}")
+    print(f"  {'backend':12s} local (no ssh needed)")
+
+    if not register:
+        say("use `machine_mgr self --register` to add it to the manifest")
+        return 0
+
+    existing = ctx.registry.get_by_mac(mac)
+    machine = existing or ctx.registry.add(Machine(mac=mac))
+    machine.name = machine.name or slugify(info["hostname"])
+    machine.hostname = info["hostname"]
+    machine.backend = "local"
+    machine.project_root = str(Path.home() / "project")
+    machine.os = info["os"] or machine.os
+    machine.os_version = info["os_version"] or machine.os_version
+    machine.touch()
+    ctx.registry.save()
+    say(f"registered local machine '{machine.display}' ({machine.mac})")
+    return 0
+
+
 def cmd_scan(ctx: Context, register: bool = False, quiet: bool = False) -> int:
     try:
         result = ctx.scan(use_cache=False)
@@ -132,6 +163,7 @@ def cmd_scan(ctx: Context, register: bool = False, quiet: bool = False) -> int:
                      "known" if known and known.os else ""])
     if register:
         ctx.registry.save()
+        cmd_self(ctx, register=True)
     table(["machine", "mac", "current ip (volatile)", "os"], rows)
     if not register:
         say("tip: `scan --register` adds new machines to the manifest (MAC only, no IP).")
@@ -159,14 +191,18 @@ def cmd_check(ctx: Context, identifier: str | None, all_machines: bool) -> int:
         except KeyError as exc:
             return fail(str(exc).strip("'"))
 
-    try:
-        result = ctx.scan(use_cache=False)
-    except RuntimeError as exc:
-        return fail(str(exc))
+    local = [m for m in machines if m.is_local]
+    remote = [m for m in machines if not m.is_local]
+    result = None
+    if remote:
+        try:
+            result = ctx.scan(use_cache=False)
+        except RuntimeError as exc:
+            return fail(str(exc))
 
     rows, online = [], 0
     for m in machines:
-        ip = result.mac_to_ip.get(m.mac)
+        ip = "127.0.0.1" if m.is_local else (result.mac_to_ip.get(m.mac) if result else None)
         alive = bool(ip)
         if alive:
             online += 1
@@ -334,6 +370,10 @@ def cmd_ssh(ctx: Context, identifier: str, command: str | None, tty: bool) -> in
     ip = ctx.ip_of(m)
     if not ip:
         return fail(f"{m.display} ({m.mac}) is offline")
+    if m.is_local:
+        import subprocess as _sp
+        proc = _sp.run(command or "bash", shell=True)
+        return proc.returncode
     user, port, password = ctx.auth_for(m)
     if not user:
         user = getpass.getuser()
@@ -766,6 +806,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("machine")
     q.add_argument("repo")
 
+    p = sub.add_parser("self", help="show/register this host as a machine")
+    p.add_argument("--register", action="store_true", help="add or update it in the manifest")
+
     sub.add_parser("doctor", help="check local prerequisites")
     sub.add_parser("interactive", help="explicitly start the interactive menu")
 
@@ -857,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_key_install(ctx, args.machine)
     if args.command == "password":
         return cmd_password(ctx, args.machine, args.password)
+    if args.command == "self":
+        return cmd_self(ctx, register=args.register)
     if args.command == "doctor":
         return cmd_doctor(ctx)
     parser.print_help()

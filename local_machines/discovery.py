@@ -154,6 +154,33 @@ def arp_table(dev: str | None = None) -> dict[str, str]:
     return entries
 
 
+def self_machine() -> dict:
+    """Describe this host: MAC of the LAN interface, IP, hostname, OS.
+
+    Needed because a host never sees its own MAC in the ARP table, so LAN
+    discovery alone can never find "me".
+    """
+    import socket
+    info = {"hostname": socket.gethostname(), "mac": "", "ip": "", "os": "", "os_version": ""}
+    try:
+        dev, cidr = lan_interface()
+        info["ip"] = cidr.split("/")[0]
+        out = run(["ip", "-o", "link", "show", dev]).stdout
+        m = re.search(r"link/ether\s+([0-9a-fA-F:]{17})", out)
+        if m:
+            info["mac"] = normalize_mac(m.group(1))
+    except (RuntimeError, OSError):
+        pass
+    try:
+        text = Path("/etc/os-release").read_text()
+        fields = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        info["os"] = fields.get("ID", "").strip('"')
+        info["os_version"] = fields.get("PRETTY_NAME", "").strip('"')
+    except OSError:
+        pass
+    return info
+
+
 # ── scanning ────────────────────────────────────────────────────────────────
 
 @dataclass

@@ -10,3 +10,4 @@ data/queue.yaml
 data/*.bak
 data/*.tmp
 data/*.lock
+data/machines.yaml

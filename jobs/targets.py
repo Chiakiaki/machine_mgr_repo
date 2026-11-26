@@ -8,7 +8,7 @@ from pathlib import Path
 from local_machines.registry import Machine
 
 from . import queue
-from .transport import Remote
+from .backend import LocalBackend, make_backend
 
 
 @dataclass
@@ -18,7 +18,15 @@ class Target:
     user: str
     port: int
     password: str | None
-    remote: Remote
+    remote: object            # LocalBackend or ssh Remote; same interface
+
+    @property
+    def backend(self):
+        return self.remote
+
+    @property
+    def is_local(self) -> bool:
+        return isinstance(self.remote, LocalBackend)
 
     @property
     def project_root(self) -> str:
@@ -27,13 +35,22 @@ class Target:
 
 def target_for(ctx, identifier: str, *, forward_agent: bool = False) -> Target:
     machine = ctx.resolve(identifier)
+    if machine.is_local:
+        backend = LocalBackend()
+        try:
+            machine.project_root = backend.resolve_path(machine.project_root or "~/project")
+        except RuntimeError:
+            pass
+        return Target(machine, "127.0.0.1", "", 0, None, backend)
+
     ip = ctx.ip_of(machine)
     if not ip:
         raise RuntimeError(f"{machine.display} ({machine.mac}) is offline")
     user, port, password = ctx.auth_for(machine)
     if not user:
         raise RuntimeError(f"no ssh user recorded for {machine.mac}")
-    remote = Remote(ip, user, port, password, forward_agent=forward_agent)
+    remote = make_backend(local=False, ip=ip, user=user, port=port,
+                          password=password, forward_agent=forward_agent)
     try:
         machine.project_root = remote.resolve_path(machine.project_root or "~/project")
     except RuntimeError:
