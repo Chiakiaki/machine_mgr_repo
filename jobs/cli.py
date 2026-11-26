@@ -47,8 +47,12 @@ def target_for(ctx, identifier: str, *, forward_agent: bool = False) -> Target:
     user, port, password = ctx.auth_for(machine)
     if not user:
         raise RuntimeError(f"no ssh user recorded for {machine.mac}")
-    return Target(machine, ip, user, port, password,
-                  Remote(ip, user, port, password, forward_agent=forward_agent))
+    remote = Remote(ip, user, port, password, forward_agent=forward_agent)
+    try:
+        machine.project_root = remote.resolve_path(machine.project_root or "~/project")
+    except RuntimeError:
+        pass
+    return Target(machine, ip, user, port, password, remote)
 
 
 def local_repo_path(ctx, repo_name: str) -> str | None:

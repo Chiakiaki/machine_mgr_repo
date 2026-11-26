@@ -445,6 +445,11 @@ MENU = [
     ("Rename a machine (or auto-derive a name)", "rename"),
     ("Auto-name machines from hostname/vendor/MAC", "autoname"),
     ("Forget a machine", "forget"),
+    ("Submit a job on a machine…", "job-submit"),
+    ("Remote job status", "job-status"),
+    ("Tail a run log", "job-logs"),
+    ("Cancel a run", "job-cancel"),
+    ("Deploy/verify a repo environment", "env"),
     ("Doctor: check prerequisites", "doctor"),
 ]
 
@@ -453,6 +458,99 @@ def _ask(prompt: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     value = input(f"  {prompt}{suffix}: ").strip()
     return value or default
+
+
+def _choose(prompt: str, options: list[str]) -> str:
+    for i, option in enumerate(options, 1):
+        print(f"    {i:2d}) {option}")
+    raw = input(f"  {prompt} [1]: ").strip() or "1"
+    if not raw.isdigit() or not (1 <= int(raw) <= len(options)):
+        raise ValueError("invalid selection")
+    return options[int(raw) - 1]
+
+
+def _pick_machine(ctx: Context, require_ssh: bool = False):
+    machines = [m for m in ctx.registry.machines if m.ssh_user] if require_ssh \
+        else list(ctx.registry.machines)
+    if not machines:
+        raise ValueError("no machines registered with an ssh user — run `register --user` first")
+    labels = [f"{m.display}  ({m.mac})" for m in machines]
+    return machines[labels.index(_choose("machine", labels))]
+
+
+def _job_ctx():
+    from jobs import cli as job_cli
+    return job_cli
+
+
+def _interactive_submit(ctx: Context) -> None:
+    from jobs import catalog
+    job_cli = _job_ctx()
+    machine = _pick_machine(ctx, require_ssh=True)
+    target = job_cli.target_for(ctx, machine.display)
+    repos = catalog.find_repos(target.remote, target.project_root)
+    if not repos:
+        print("  no repo with a .machine_mgr.yaml on that machine")
+        return
+    repo_name = _choose("repo", [r.name for r in repos])
+    # find_repos() only sees descriptors; resolve_repo() also loads the file list
+    repo = catalog.resolve_repo(target.remote, target.project_root, repo_name)
+
+    groups = ["(all jobs)"] + [g.title for g in repo.descriptor.groups]
+    group = _choose("filter", groups)
+    from jobs.contract import jobs_in_group, list_jobs
+    jobs = (list_jobs(repo.descriptor, repo.files) if group == "(all jobs)"
+            else jobs_in_group(repo.descriptor, next(g for g in repo.descriptor.groups
+                                                    if g.title == group), repo.files))
+    if not jobs:
+        print("  no jobs match")
+        return
+    job = _choose(f"job ({len(jobs)} available)", jobs)
+    extra = input("  extra arguments (empty = none): ").strip()
+    answer = input(f"  submit {repo_name}:{job} on {machine.display}? (y/N) ").strip().lower()
+    if not answer.startswith("y"):
+        print("  cancelled")
+        return
+    job_cli.cmd_submit(ctx, machine.display, repo_name, job, extra=extra)
+
+
+def _interactive_status(ctx: Context) -> None:
+    _job_ctx().cmd_status(ctx, None, None)
+
+
+def _interactive_logs(ctx: Context) -> None:
+    runs = ctx.runs.recent()[:10]
+    if not runs:
+        print("  no runs recorded")
+        return
+    labels = [f"{r.id}  {r.status:9s} {r.machine}" for r in runs]
+    run = runs[labels.index(_choose("run", labels))]
+    lines = input("  lines [40]: ").strip() or "40"
+    _job_ctx().cmd_logs(ctx, run.id, int(lines))
+
+
+def _interactive_cancel(ctx: Context) -> None:
+    runs = [r for r in ctx.runs.recent()[:10] if r.status in ("running", "lost", "")]
+    if not runs:
+        print("  no active runs")
+        return
+    labels = [f"{r.id}  {r.status:9s} {r.machine}" for r in runs]
+    run = runs[labels.index(_choose("run to cancel", labels))]
+    _job_ctx().cmd_cancel(ctx, run.id)
+
+
+def _interactive_env(ctx: Context) -> None:
+    from jobs import catalog
+    job_cli = _job_ctx()
+    machine = _pick_machine(ctx, require_ssh=True)
+    target = job_cli.target_for(ctx, machine.display, forward_agent=True)
+    repos = catalog.find_repos(target.remote, target.project_root)
+    if not repos:
+        print("  no repo with a .machine_mgr.yaml on that machine")
+        return
+    repo_name = _choose("repo", [r.name for r in repos])
+    action = _choose("action", ["deploy (install/repair)", "verify (check only)"])
+    job_cli.cmd_env(ctx, machine.display, repo_name, "verify" if action.startswith("verify") else "deploy")
 
 
 def interactive(ctx: Context) -> int:
@@ -507,12 +605,22 @@ def interactive(ctx: Context) -> int:
                              ident.lower() in ("all", ""))
             elif action == "forget":
                 cmd_forget(ctx, _ask("machine"))
+            elif action == "job-submit":
+                _interactive_submit(ctx)
+            elif action == "job-status":
+                _interactive_status(ctx)
+            elif action == "job-logs":
+                _interactive_logs(ctx)
+            elif action == "job-cancel":
+                _interactive_cancel(ctx)
+            elif action == "env":
+                _interactive_env(ctx)
             elif action == "doctor":
                 cmd_doctor(ctx)
         except KeyboardInterrupt:
             print("\n  cancelled")
-        except KeyError as exc:
-            print(f"  error: {exc}")
+        except (KeyError, ValueError, RuntimeError) as exc:
+            print(f"  error: {str(exc).strip(chr(39))}")
         input("\n  press enter to continue...")
 
 

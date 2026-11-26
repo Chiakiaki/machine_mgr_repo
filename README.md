@@ -154,6 +154,10 @@ the per-run directory on the target (`.machine_mgr/runs/<run-id>/{command.sh,
 submitted.yaml,log,pid,exit}`), started with `setsid` so it survives ssh
 disconnects.
 
+The same actions are available interactively — menu item **14 Submit a job**
+walks *machine → repo → group → job → extra args*, and **15–18** handle status,
+log tail, cancel and environment deploy.
+
 Preflight on submit checks: local vs target git HEAD, uncommitted/unpushed local
 work, GPU free memory, and concurrent runs in the same repo. Override git with
 `--allow-head-mismatch`, everything with `--force`.

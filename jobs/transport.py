@@ -56,5 +56,17 @@ class Remote:
         code, _, _ = self.try_run(f"test -d {shlex.quote(path)}")
         return code == 0
 
+    def resolve_path(self, path: str) -> str:
+        """Expand a leading '~' using the remote $HOME.
+
+        Doing it here (rather than writing "$HOME/..." into a command) keeps
+        every later use quotable with shlex.quote, with no shell expansion and
+        no injection surface.
+        """
+        if path == "~" or path.startswith("~/"):
+            home = self.run("echo $HOME").strip()
+            return home + path[1:]
+        return path
+
     def git_head(self, repo: str) -> str:
         return self.run(f"git -C {shlex.quote(repo)} rev-parse HEAD").strip()

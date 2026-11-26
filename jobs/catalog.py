@@ -25,8 +25,9 @@ class RepoRef:
 
 def find_repos(remote: Remote, project_root: str) -> list[RepoRef]:
     """All repos under ``project_root`` that ship a descriptor."""
+    root = remote.resolve_path(project_root)
     listing = remote.run(
-        f"find {shlex.quote(project_root)} -maxdepth 2 -name {DESCRIPTOR_NAME} "
+        f"find {shlex.quote(root)} -maxdepth 2 -name {DESCRIPTOR_NAME} "
         f"-not -path '*/.git/*' -print 2>/dev/null | sort"
     )
     repos: list[RepoRef] = []
