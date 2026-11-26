@@ -163,9 +163,13 @@ no babysitting:
 ./machine_mgr job queue clear              # drop finished entries
 ```
 
-State is persisted in `data/queue.yaml`. Stopping the scheduler does **not** stop
-the job already running on the target (it is detached there); pending entries
-stay pending and `job queue run` continues where it stopped. Re-queueing an
+State is persisted in `data/queue.yaml` with atomic writes, a count/sha256
+integrity header and a `.bak` fallback, and only one scheduler may run at a time
+(`flock`). Liveness is judged by pid **plus** the process cmdline, so a job
+killed by OOM or a reboot is marked `stale` instead of blocking the queue
+forever. Stopping the scheduler does **not** stop the job already running on the
+target (it is detached there); pending entries stay pending and `job queue run`
+continues where it stopped. Re-queueing an
 identical job is de-duplicated unless `--allow-duplicate`.
 `--resume-from <run-id>` appends that run's newest checkpoint path, and a
 cancelled job is reported as `cancelled` rather than as failure 143.

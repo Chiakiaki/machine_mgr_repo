@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .preflight import probe_run
+from .queue import atomic
 from .transport import Remote
 
 RUN_FIELDS = ("id", "machine", "machine_mac", "repo", "repo_path", "job", "run_dir",
@@ -49,7 +51,9 @@ class RunStore:
     def load(self) -> None:
         if not self.path.exists():
             return
-        data = yaml.safe_load(self.path.read_text()) or {}
+        data, _source, _note = atomic.load_document(self.path, list_key="runs")
+        if data is None:
+            return
         for entry in data.get("runs", []):
             if not isinstance(entry, dict) or not entry.get("id"):
                 continue
@@ -58,11 +62,12 @@ class RunStore:
             self.runs.append(Run(**kwargs))
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": 1, "runs": [r.to_dict() for r in self.runs]}
-        self.path.write_text(
-            "# machine_mgr run registry — one entry per submitted job.\n"
-            + yaml.safe_dump(payload, sort_keys=False)
+        runs = [r.to_dict() for r in self.runs]
+        payload = {"version": 1, "runs_count": len(runs),
+                   "runs_sha256": atomic.checksum(runs), "runs": runs}
+        atomic.write_document(
+            self.path, payload,
+            header="# machine_mgr run registry — one entry per submitted job.\n",
         )
 
     def add(self, run: Run) -> Run:
@@ -89,30 +94,22 @@ class RunStore:
 # ── remote operations ───────────────────────────────────────────────────────
 
 def refresh(remote: Remote, run: Run) -> Run:
-    """Update status from the remote exit/pid files."""
-    cmd = (
-        f"if [ -f {shlex.quote(run.run_dir + '/exit')} ]; then "
-        f"echo \"EXIT:$(cat {shlex.quote(run.run_dir + '/exit')})\"; "
-        f"elif [ -f {shlex.quote(run.run_dir + '/pid')} ] && "
-        f"kill -0 $(cat {shlex.quote(run.run_dir + '/pid')}) 2>/dev/null; then echo RUNNING; "
-        f"else echo LOST; fi"
-    )
-    code, out, _ = remote.try_run(cmd)
-    state = out.strip()
-    if state.startswith("EXIT:"):
-        run.exit_code = int(state.split(":", 1)[1] or -1)
-        code, _, _ = remote.try_run(f"test -f {shlex.quote(run.run_dir + '/cancel')}")
-        if code == 0:
+    """Update status from the run directory, using liveness-aware probing."""
+    state, code = probe_run(remote, run.run_dir)
+    if state == "EXIT":
+        run.exit_code = code
+        marker, _, _ = remote.try_run(f"test -f {shlex.quote(run.run_dir + '/cancel')}")
+        if marker == 0:
             run.status = "cancelled"
         else:
-            run.status = "finished" if run.exit_code == 0 else "failed"
+            run.status = "finished" if code == 0 else "failed"
         if not run.finished:
             import datetime as _dt
             run.finished = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
     elif state == "RUNNING":
         run.status = "running"
     else:
-        run.status = "lost"
+        run.status = "lost"          # dir exists, process gone (kill/OOM/reboot)
     return run
 
 

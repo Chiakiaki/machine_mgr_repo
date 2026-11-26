@@ -7,3 +7,6 @@ data/secrets.yaml
 data/jobs.yaml
 data/artifacts/
 data/queue.yaml
+data/*.bak
+data/*.tmp
+data/*.lock

@@ -98,12 +98,24 @@ def gpu_issues(remote: Remote, descriptor: Descriptor) -> list[Issue]:
 
 
 def active_runs(remote: Remote, repo_path: str) -> list[str]:
-    """Run ids on the target whose exit file is absent (best effort)."""
-    code, out, _ = remote.try_run(
-        f"cd {shlex.quote(repo_path)} 2>/dev/null && "
-        f"for d in .machine_mgr/runs/*/; do [ -d \"$d\" ] || continue; "
-        f"[ -f \"$d/exit\" ] || basename \"$d\"; done"
-    )
+    """Run ids whose process is genuinely alive.
+
+    A run dir with no ``exit`` file but a dead pid (SIGKILL, OOM, reboot) is
+    marked with a ``stale`` file and *not* counted, otherwise the scheduler
+    would wait for it forever.
+    """
+    script = (
+        "cd {repo} 2>/dev/null || exit 0; "
+        'for d in .machine_mgr/runs/*/; do '
+        '[ -d "$d" ] || continue; '
+        '[ -f "$d/exit" ] && continue; '
+        'pid=$(cat "$d/pid" 2>/dev/null); '
+        'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && '
+        'tr "\\0" " " < "/proc/$pid/cmdline" 2>/dev/null | grep -q command.sh; then '
+        'basename "$d"; else : > "$d/stale" 2>/dev/null; fi; '
+        "done"
+    ).format(repo=shlex.quote(repo_path))
+    code, out, _ = remote.try_run(script)
     return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
 
 
@@ -155,3 +167,28 @@ def readiness(remote: Remote, repo_path: str, descriptor: Descriptor) -> tuple[b
             if free_gb < need_ram:
                 reasons.append(f"RAM free {free_gb:.1f} GiB < {need_ram:.1f} GiB")
     return (not reasons), reasons
+
+
+def probe_run(remote: Remote, run_dir: str) -> tuple[str, int | None]:
+    """Authoritative state of one run dir: ('RUNNING'|'EXIT:<code>'|'LOST').
+
+    Liveness requires the pid to exist *and* its /proc cmdline to still be this
+    run's command.sh — a bare `kill -0` would report a reused pid after a reboot
+    as running.
+    """
+    cmd = (
+        f"d={shlex.quote(run_dir)}; "
+        f'if [ -f "$d/exit" ]; then echo "EXIT:$(cat \"$d/exit\")"; '
+        f'else pid=$(cat "$d/pid" 2>/dev/null); '
+        f'if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && '
+        f'tr "\\0" " " < "/proc/$pid/cmdline" 2>/dev/null | grep -q command.sh; '
+        f'then echo RUNNING; else echo LOST; fi; fi'
+    )
+    code, out, _ = remote.try_run(cmd)
+    state = out.strip().splitlines()[-1] if out.strip() else "LOST"
+    if state.startswith("EXIT:"):
+        try:
+            return "EXIT", int(state.split(":", 1)[1] or -1)
+        except ValueError:
+            return "EXIT", -1
+    return (state if state == "RUNNING" else "LOST"), None
