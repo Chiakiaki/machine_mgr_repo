@@ -64,6 +64,7 @@ artifacts:                     # optional, used by `job fetch`
 limits:                        # optional
   max_parallel: 1              # refuse a second concurrent run in this repo
   min_free_gpu_mem_gb: 2       # preflight error when the GPU is too busy
+  min_free_ram_gb: 6           # preflight/queue gate on free RAM
 ```
 
 ### Placeholders

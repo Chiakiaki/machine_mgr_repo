@@ -6,3 +6,4 @@ data/secrets.yaml
 .venv/
 data/jobs.yaml
 data/artifacts/
+data/queue.yaml

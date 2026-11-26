@@ -149,6 +149,27 @@ descriptor (schema in [docs/job-contract.md](docs/job-contract.md)) and
 ./machine_mgr env  verify alienware-m17 bdp_benchmark
 ```
 
+### Batches: `job queue`
+
+`job queue` runs many jobs **one at a time**, gated by the repo's
+`max_parallel` / `min_free_gpu_mem_gb` / `min_free_ram_gb`, so a long batch needs
+no babysitting:
+
+```bash
+./machine_mgr job queue add alienware-m17 bdp_benchmark <job>     # repeat for each job
+./machine_mgr job queue list
+./machine_mgr job queue run --poll 120     # Ctrl-C is safe; rerun to resume
+./machine_mgr job queue run --dry-run      # plan only: readiness, no submission
+./machine_mgr job queue clear              # drop finished entries
+```
+
+State is persisted in `data/queue.yaml`. Stopping the scheduler does **not** stop
+the job already running on the target (it is detached there); pending entries
+stay pending and `job queue run` continues where it stopped. Re-queueing an
+identical job is de-duplicated unless `--allow-duplicate`.
+`--resume-from <run-id>` appends that run's newest checkpoint path, and a
+cancelled job is reported as `cancelled` rather than as failure 143.
+
 Runs are recorded in `data/jobs.yaml` (local index); the authoritative state is
 the per-run directory on the target (`.machine_mgr/runs/<run-id>/{command.sh,
 submitted.yaml,log,pid,exit}`), started with `setsid` so it survives ssh

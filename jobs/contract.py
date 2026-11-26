@@ -72,6 +72,7 @@ class Artifact:
 class Limits:
     max_parallel: int = 1
     min_free_gpu_mem_gb: float = 0.0
+    min_free_ram_gb: float = 0.0
 
 
 @dataclass
@@ -178,6 +179,7 @@ def parse_descriptor(text: str, *, source: str = "<descriptor>") -> Descriptor:
         limits=Limits(
             max_parallel=int(limits_raw.get("max_parallel", 1)),
             min_free_gpu_mem_gb=float(limits_raw.get("min_free_gpu_mem_gb", 0.0)),
+            min_free_ram_gb=float(limits_raw.get("min_free_ram_gb", 0.0)),
         ),
     )
 

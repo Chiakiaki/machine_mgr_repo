@@ -11,6 +11,7 @@ from pathlib import Path
 from . import discovery, ssh_tools
 from .discovery import ScanCache, normalize_mac
 from .registry import Machine, Registry, slugify, unique_name
+from jobs.queue import QueueStore
 from jobs.tracker import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,7 @@ class Context:
                  local_project_root: str | None = None) -> None:
         self.data_dir = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
         self.runs = RunStore(self.data_dir / "jobs.yaml")
+        self.queue = QueueStore(self.data_dir / "queue.yaml")
         self.local_project_root = str(local_project_root or DEFAULT_LOCAL_PROJECT)
         self.registry = Registry(manifest)
         self.credentials = ssh_tools.Credentials(DEFAULT_SECRETS)
@@ -716,6 +718,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--dry-run", action="store_true", help="print the script, submit nothing")
     q.add_argument("--allow-head-mismatch", action="store_true")
     q.add_argument("--force", action="store_true", help="ignore preflight errors")
+    q.add_argument("--resume-from", default="", help="continue from a previous run's checkpoint")
     q = jsub.add_parser("status", help="run status")
     q.add_argument("run_id", nargs="?")
     q.add_argument("--machine")
@@ -728,6 +731,23 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("run_id")
     q.add_argument("--artifact", default=None)
     q.add_argument("--dest")
+    q = jsub.add_parser("queue", help="batch submissions that run one at a time")
+    qsub = q.add_subparsers(dest="queue_command", required=True)
+    r = qsub.add_parser("add", help="enqueue a job")
+    r.add_argument("machine")
+    r.add_argument("repo")
+    r.add_argument("job")
+    r.add_argument("--extra", default="")
+    r.add_argument("--resume-from", default="")
+    r.add_argument("--allow-duplicate", action="store_true")
+    r = qsub.add_parser("list", help="show the queue")
+    r = qsub.add_parser("run", help="drain the queue (one job at a time)")
+    r.add_argument("--poll", type=float, default=60.0, help="seconds between checks")
+    r.add_argument("--once", action="store_true", help="single scheduling pass, then exit")
+    r.add_argument("--dry-run", action="store_true", help="plan only: check readiness, submit nothing")
+    r = qsub.add_parser("clear", help="drop finished entries")
+    r.add_argument("--all", action="store_true", help="drop everything, including pending")
+
     q = jsub.add_parser("sync", help="git pull the target checkout")
     q.add_argument("machine")
     q.add_argument("repo")
@@ -771,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
             return job_cli.cmd_submit(ctx, args.machine, args.repo, args.job,
                                       extra=args.extra, dry_run=args.dry_run,
                                       allow_head_mismatch=args.allow_head_mismatch,
-                                      force=args.force)
+                                      force=args.force, resume_from=args.resume_from)
         if cmd == "status":
             return job_cli.cmd_status(ctx, args.run_id, args.machine)
         if cmd == "logs":
@@ -782,6 +802,17 @@ def main(argv: list[str] | None = None) -> int:
             return job_cli.cmd_fetch(ctx, args.run_id, args.artifact, args.dest)
         if cmd == "sync":
             return job_cli.cmd_sync(ctx, args.machine, args.repo)
+        if cmd == "queue":
+            sub = args.queue_command
+            if sub == "add":
+                return job_cli.cmd_queue_add(ctx, args.machine, args.repo, args.job,
+                                             args.extra, args.resume_from, args.allow_duplicate)
+            if sub == "list":
+                return job_cli.cmd_queue_list(ctx)
+            if sub == "run":
+                return job_cli.cmd_queue_run(ctx, args.poll, args.once, args.dry_run)
+            if sub == "clear":
+                return job_cli.cmd_queue_clear(ctx, args.all)
 
     if args.command == "env":
         from jobs import cli as job_cli

@@ -112,3 +112,46 @@ def busy_issues(remote: Remote, repo_path: str, descriptor: Descriptor) -> list[
     if running and len(running) >= descriptor.limits.max_parallel:
         return [Issue(ERROR, f"{len(running)} job(s) still active in this repo: {', '.join(running)}")]
     return []
+
+
+def ram_issues(remote: Remote, descriptor: Descriptor) -> list[Issue]:
+    """RAM gate: free memory must clear limits.min_free_ram_gb."""
+    need = descriptor.limits.min_free_ram_gb
+    code, out, _ = remote.try_run("free -m | awk '/^Mem:/{print $7}'")
+    if code != 0 or not out.strip().isdigit():
+        return []
+    free_gb = int(out.strip()) / 1024
+    if need and free_gb < need:
+        return [Issue(ERROR, f"only {free_gb:.1f} GiB RAM available, job requires {need:.1f} GiB")]
+    return [Issue(WARN, f"RAM available: {free_gb:.1f} GiB")]
+
+
+def readiness(remote: Remote, repo_path: str, descriptor: Descriptor) -> tuple[bool, list[str]]:
+    """Can another job start right now? (queue scheduler uses this)."""
+    reasons: list[str] = []
+    running = active_runs(remote, repo_path)
+    if len(running) >= descriptor.limits.max_parallel:
+        reasons.append(f"{len(running)} job(s) already running (max_parallel={descriptor.limits.max_parallel})")
+
+    need_gpu = descriptor.limits.min_free_gpu_mem_gb
+    if need_gpu:
+        code, out, _ = remote.try_run(
+            "nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null"
+        )
+        if code == 0 and out.strip():
+            try:
+                total, used = (int(x) for x in out.strip().splitlines()[0].split(",")[:2])
+                free_gb = (total - used) / 1024
+                if free_gb < need_gpu:
+                    reasons.append(f"GPU free {free_gb:.1f} GiB < {need_gpu:.1f} GiB")
+            except ValueError:
+                pass
+
+    need_ram = descriptor.limits.min_free_ram_gb
+    if need_ram:
+        code, out, _ = remote.try_run("free -m | awk '/^Mem:/{print $7}'")
+        if code == 0 and out.strip().isdigit():
+            free_gb = int(out.strip()) / 1024
+            if free_gb < need_ram:
+                reasons.append(f"RAM free {free_gb:.1f} GiB < {need_ram:.1f} GiB")
+    return (not reasons), reasons

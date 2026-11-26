@@ -101,7 +101,11 @@ def refresh(remote: Remote, run: Run) -> Run:
     state = out.strip()
     if state.startswith("EXIT:"):
         run.exit_code = int(state.split(":", 1)[1] or -1)
-        run.status = "finished" if run.exit_code == 0 else "failed"
+        code, _, _ = remote.try_run(f"test -f {shlex.quote(run.run_dir + '/cancel')}")
+        if code == 0:
+            run.status = "cancelled"
+        else:
+            run.status = "finished" if run.exit_code == 0 else "failed"
         if not run.finished:
             import datetime as _dt
             run.finished = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -122,6 +126,7 @@ def logs(remote: Remote, run: Run, lines: int = 40) -> str:
 def cancel(remote: Remote, run: Run) -> str:
     """SIGTERM the whole process group started by setsid."""
     cmd = (
+        f"touch {shlex.quote(run.run_dir + '/cancel')} 2>/dev/null; "
         f"pid=$(cat {shlex.quote(run.run_dir + '/pid')} 2>/dev/null); "
         f"[ -n \"$pid\" ] && kill -TERM -- -$pid 2>/dev/null || kill -TERM $pid 2>/dev/null; "
         f"sleep 2; kill -0 $pid 2>/dev/null && echo STILL_RUNNING || echo STOPPED"
