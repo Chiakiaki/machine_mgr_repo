@@ -20,6 +20,33 @@ from pathlib import Path
 
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
+# Small curated OUI table so auto-named machines get a recognisable hint.
+# Extend freely; unknown prefixes simply fall back to the MAC suffix.
+OUI_VENDORS = {
+    "00:1c:b3": "apple", "3c:22:fb": "apple", "f0:18:98": "apple", "a4:83:e7": "apple",
+    "18:65:90": "apple", "bc:92:6b": "apple", "dc:a6:32": "raspberrypi",
+    "e4:5f:01": "raspberrypi", "2c:cf:67": "raspberrypi", "b8:27:eb": "raspberrypi",
+    "00:1a:11": "google", "f4:f5:d8": "google", "24:0a:c4": "espressif",
+    "84:0d:8e": "espressif", "3c:61:05": "espressif", "7c:df:a1": "espressif",
+    "00:1e:c9": "dell", "14:fe:b5": "dell", "f8:bc:12": "dell", "84:2b:2b": "dell",
+    "00:21:5a": "hp", "3c:d9:2b": "hp", "94:57:a5": "hp",
+    "00:23:24": "lenovo", "54:ee:75": "lenovo", "e8:6a:64": "lenovo",
+    "00:26:bb": "apple", "00:1b:21": "intel", "3c:97:0e": "intel", "8c:16:45": "intel",
+    "00:1f:3a": "samsung", "34:23:87": "samsung", "78:1f:db": "samsung",
+    "18:59:36": "xiaomi", "64:cc:2e": "xiaomi", "78:11:dc": "xiaomi",
+    "00:25:9c": "cisco", "00:1a:a1": "cisco", "0c:68:03": "cisco",
+    "44:d9:e7": "ubiquiti", "78:8a:20": "ubiquiti", "f0:9f:c2": "ubiquiti",
+    "2c:3a:e8": "tplink", "50:c7:bf": "tplink", "98:da:c4": "tplink",
+    "00:1f:33": "netgear", "2c:30:33": "netgear", "a0:40:a0": "netgear",
+    "00:24:e8": "sonos", "48:a6:b8": "sonos", "5c:aa:fd": "sonos",
+    "00:16:3e": "xen", "52:54:00": "qemu", "08:00:27": "virtualbox",
+}
+
+
+def vendor_for(mac: str) -> str:
+    """Best-effort vendor name from the first three octets ('' when unknown)."""
+    return OUI_VENDORS.get(mac[:8].lower(), "")
+
 
 # ── small helpers ───────────────────────────────────────────────────────────
 

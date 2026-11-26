@@ -63,6 +63,8 @@ cd machine_mgr_repo
 | `check <mac\|name\|all>` | **Is it online right now?** Resolves the live IP or reports offline |
 | `show <mac\|name>` | Full manifest entry + current (volatile) address |
 | `register <mac> [--name --user --port --notes] [--ask-password\|--password-stdin]` | Add/annotate a machine, optionally storing its SSH credentials |
+| `rename <mac\|name> [label]` | Set a label; omit the label to derive one. Collisions get `-2`, `-3`, … |
+| `autoname [<mac\|name>\|--all]` | Derive labels from hostname, vendor OUI, or MAC tail |
 | `forget <mac\|name>` | Remove it from the manifest |
 | `probe <mac\|name>` | SSH in, record hostname/OS/kernel into the manifest |
 | `ssh <mac\|name> [cmd…]` | Resolve current IP, then open a shell or run a command |
@@ -76,18 +78,18 @@ registered name, or the hostname.
 
 ## Typical first-contact workflow
 
-This is exactly the sequence used to bring up the `dell` machine in the sample
+This is exactly the sequence used to bring up the `alienware-m17` machine in the sample
 manifest, and the one to follow for a new host:
 
 ```bash
 ./machine_mgr doctor                    # ssh/ssh-copy-id/ping/ip present?
 ./machine_mgr scan --register           # find MACs on the LAN
-./machine_mgr register <mac> --name dell --user ruoyu --ask-password
-./machine_mgr check dell                # online, and which IP right now?
-./machine_mgr probe dell                # hostname/OS/kernel recorded into the manifest
-./machine_mgr key-install dell          # password used once, then key auth
-./machine_mgr mkdir dell                # create ~/project on the target
-./machine_mgr ssh dell                  # passwordless shell from now on
+./machine_mgr register <mac> --name alienware-m17 --user ruoyu --ask-password
+./machine_mgr check alienware-m17                # online, and which IP right now?
+./machine_mgr probe alienware-m17                # hostname/OS/kernel recorded into the manifest
+./machine_mgr key-install alienware-m17          # password used once, then key auth
+./machine_mgr mkdir alienware-m17                # create ~/project on the target
+./machine_mgr ssh alienware-m17                  # passwordless shell from now on
 ```
 
 `probe` stamps `hostname`, `os` and `os_version`; `check` updates `last_seen`.
@@ -104,6 +106,27 @@ Neither writes an IP address.
 | `mkdir` made a directory literally called `~` | Fixed in `remote_path()`; make sure you are not on an old checkout |
 | Password rejected when using `--ask-password` | User was not registered first; pass `--user` together with the password |
 
+## Names are labels, not identities
+
+The label is yours to choose — `alienware-m17`, `lab-box`, `pi-4`. It is only a
+convenience; the MAC remains the identity, so renaming never breaks `check` or
+`ssh`.
+
+Machines registered by `scan --register` get an automatic label so the manifest
+is readable before you know what the box is:
+
+| Situation | Derived label |
+| --- | --- |
+| hostname recorded by `probe` | `ruoyu-Alienware-m17-R5-AMD` → `ruoyu-alienware-m17-r5` |
+| known vendor OUI, no hostname | `b8:27:eb:…` → `raspberrypi-12ab` |
+| unknown vendor, no hostname | `aa:9c:26:f6:e3:9f` → `host-e39f` |
+
+Duplicate labels are never allowed: `rename` and `autoname` append `-2`, `-3`, …
+If you keep the derived label, `probe` upgrades it once the real hostname is
+known (`host-3613` → `ruoyu-alienware-m17-r5`); a label you chose yourself is
+never overwritten. Hostnames are slugged to 24 characters, cut at a token
+boundary, so nothing ends mid-word.
+
 ## Manifest
 
 `data/machines.yaml`, one entry per machine, keyed by MAC:
@@ -113,8 +136,8 @@ version: 1
 updated: '2026-11-26T05:40:00+00:00'
 machines:
 - mac: cc:5e:f8:07:36:13
-  name: dell-ubuntu
-  hostname: dell
+  name: alienware-m17
+  hostname: ruoyu-Alienware-m17-R5-AMD
   ssh_user: sry
   ssh_port: 22
   os: ubuntu
@@ -148,19 +171,19 @@ later `check` / `probe` / `ssh` reuses it without prompting:
 
 ```bash
 # interactive: prompts for the password with no echo
-./machine_mgr register cc:5e:f8:07:36:13 --name dell --user sry --ask-password
+./machine_mgr register cc:5e:f8:07:36:13 --name alienware-m17 --user sry --ask-password
 
 # scripted: the password goes through stdin, so it never appears in `ps`
 # or your shell history
 printf '%s\n' "$PW" | ./machine_mgr register cc:5e:f8:07:36:13 \
-    --name dell --user sry --password-stdin
+    --name alienware-m17 --user sry --password-stdin
 
 # or retro-fit an already-registered machine
-./machine_mgr password dell
+./machine_mgr password alienware-m17
 ```
 
 Stored under `data/secrets.yaml` (mode 600, git-ignored), keyed by MAC. From
-then on `./machine_mgr ssh dell` and interactive option **7** open a shell
+then on `./machine_mgr ssh alienware-m17` and interactive option **7** open a shell
 directly. Interactive option **5** (register) asks whether to store the
 password in the same step. `./machine_mgr show <mac>` reports whether
 credentials exist for an entry.

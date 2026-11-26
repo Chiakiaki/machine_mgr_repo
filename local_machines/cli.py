@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import discovery, ssh_tools
 from .discovery import ScanCache, normalize_mac
-from .registry import Machine, Registry
+from .registry import Machine, Registry, slugify, unique_name
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "data" / "machines.yaml"
@@ -81,6 +81,26 @@ class Context:
         return user, machine.ssh_port or 22, password
 
 
+def auto_name(machine: Machine, machines: list[Machine]) -> str:
+    """Derive a readable, collision-free label.
+
+    Priority: recorded hostname, then OUI vendor + MAC suffix, then a generic
+    host-<mac tail>. Duplicates always get -2, -3, … appended.
+    """
+    base = slugify(machine.hostname) if machine.hostname else ""
+    if not base:
+        vendor = discovery.vendor_for(machine.mac)
+        tail = machine.mac.replace(":", "")[-4:]
+        base = f"{vendor}-{tail}" if vendor else f"host-{tail}"
+    return unique_name(base, machines, ignore_mac=machine.mac)
+
+
+def is_auto_named(machine: Machine) -> bool:
+    tail = machine.mac.replace(":", "")[-4:]
+    return (not machine.name) or machine.name.startswith("host-") or \
+        machine.name.endswith(tail)
+
+
 # ── commands ───────────────────────────────────────────────────────────────
 
 def cmd_scan(ctx: Context, register: bool = False, quiet: bool = False) -> int:
@@ -98,6 +118,7 @@ def cmd_scan(ctx: Context, register: bool = False, quiet: bool = False) -> int:
             known.touch()
         elif register:
             known = ctx.registry.add(Machine(mac=mac))
+            known.name = auto_name(known, ctx.registry.machines)
         rows.append([known.display if known else "(unregistered)", mac, ip,
                      "known" if known and known.os else ""])
     if register:
@@ -209,6 +230,47 @@ def cmd_register(ctx: Context, mac: str, name: str | None, user: str | None,
     return 0
 
 
+def cmd_rename(ctx: Context, identifier: str, new_name: str | None) -> int:
+    try:
+        m = ctx.resolve(identifier)
+    except KeyError as exc:
+        return fail(str(exc).strip("'"))
+    if not new_name:
+        new_name = auto_name(m, ctx.registry.machines)
+        say(f"derived name '{new_name}'")
+    cleaned = slugify(new_name)
+    if not cleaned:
+        return fail("name is empty after normalisation")
+    clash = next((x for x in ctx.registry.machines
+                  if x.mac != m.mac and x.name.lower() == cleaned), None)
+    if clash:
+        cleaned = unique_name(cleaned, ctx.registry.machines, ignore_mac=m.mac)
+        say(f"'{slugify(new_name)}' taken by {clash.mac}; using '{cleaned}'")
+    old, m.name = m.name, cleaned
+    ctx.registry.save()
+    say(f"renamed {m.mac}: '{old or '-'}' -> '{cleaned}'")
+    return 0
+
+
+def cmd_autoname(ctx: Context, identifier: str | None, all_machines: bool) -> int:
+    targets = ctx.registry.machines if all_machines else []
+    if not all_machines:
+        try:
+            targets = [ctx.resolve(identifier or "")]
+        except KeyError as exc:
+            return fail(str(exc).strip("'"))
+    changed = 0
+    for m in targets:
+        new = auto_name(m, ctx.registry.machines)
+        if new != m.name:
+            say(f"{m.mac}: '{m.name or '-'}' -> '{new}'")
+            m.name = new
+            changed += 1
+    ctx.registry.save()
+    say(f"{changed} machine(s) renamed")
+    return 0
+
+
 def cmd_forget(ctx: Context, identifier: str) -> int:
     try:
         m = ctx.resolve(identifier)
@@ -240,9 +302,15 @@ def cmd_probe(ctx: Context, identifier: str, save: bool = True) -> int:
     for key, value in facts.items():
         print(f"  {key:14s} {value}")
     if save:
+        was_auto = is_auto_named(m)
         m.hostname = facts.get("hostname", m.hostname)
         m.os = facts.get("os_id", m.os)
         m.os_version = facts.get("os_pretty") or facts.get("os_version") or m.os_version
+        if was_auto and m.hostname:
+            new = auto_name(m, ctx.registry.machines)
+            if new != m.name:
+                say(f"auto-renamed '{m.name or m.mac}' -> '{new}' (from hostname)")
+                m.name = new
         m.touch()
         ctx.registry.save()
         say("manifest updated")
@@ -367,6 +435,8 @@ MENU = [
     ("Create a directory on a machine (~/project)", "mkdir"),
     ("Install my SSH key on a machine", "key-install"),
     ("Store SSH password for a machine", "password"),
+    ("Rename a machine (or auto-derive a name)", "rename"),
+    ("Auto-name machines from hostname/vendor/MAC", "autoname"),
     ("Forget a machine", "forget"),
     ("Doctor: check prerequisites", "doctor"),
 ]
@@ -422,6 +492,12 @@ def interactive(ctx: Context) -> int:
                 cmd_key_install(ctx, _ask("machine"))
             elif action == "password":
                 cmd_password(ctx, _ask("machine"), None)
+            elif action == "rename":
+                cmd_rename(ctx, _ask("machine"), _ask("new name (empty = auto)") or None)
+            elif action == "autoname":
+                ident = _ask("machine (or 'all')")
+                cmd_autoname(ctx, None if ident.lower() in ("all", "") else ident,
+                             ident.lower() in ("all", ""))
             elif action == "forget":
                 cmd_forget(ctx, _ask("machine"))
             elif action == "doctor":
@@ -474,6 +550,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="prompt for the SSH password now and store it")
     p.add_argument("--password-stdin", action="store_true",
                    help="read the SSH password from stdin (keeps it out of ps/history)")
+
+    p = sub.add_parser("rename", help="give a machine a label (deduplicated)")
+    p.add_argument("machine")
+    p.add_argument("name", nargs="?", help="new label; omit to derive one automatically")
+
+    p = sub.add_parser("autoname", help="derive labels from hostname/vendor/MAC")
+    p.add_argument("machine", nargs="?")
+    p.add_argument("--all", action="store_true")
 
     p = sub.add_parser("forget", help="remove a machine from the manifest")
     p.add_argument("machine")
@@ -529,6 +613,10 @@ def main(argv: list[str] | None = None) -> int:
             password = sys.stdin.readline().rstrip("\n")
         return cmd_register(ctx, args.mac, args.name, args.user, args.port, args.notes,
                             password, args.ask_password or args.password_stdin)
+    if args.command == "rename":
+        return cmd_rename(ctx, args.machine, args.name)
+    if args.command == "autoname":
+        return cmd_autoname(ctx, args.machine, args.all)
     if args.command == "forget":
         return cmd_forget(ctx, args.machine)
     if args.command == "probe":

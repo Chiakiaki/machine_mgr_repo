@@ -29,6 +29,37 @@ SCHEMA_FIELDS = [
 ]
 
 
+NAME_MAX = 24
+
+
+def slugify(text: str, *, max_len: int = NAME_MAX) -> str:
+    """Lower-case, hyphen-separated label: 'Ruoyu_Alienware m17' -> 'ruoyu-alienware-m17'."""
+    import re as _re
+    slug = _re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    if not slug:
+        return ""
+    if len(slug) <= max_len:
+        return slug
+    # cut at a token boundary rather than mid-word
+    out = ""
+    for token in slug.split("-"):
+        candidate = f"{out}-{token}" if out else token
+        if len(candidate) > max_len:
+            break
+        out = candidate
+    return out or slug[:max_len].strip("-")
+
+
+def unique_name(base: str, machines: list["Machine"], ignore_mac: str | None = None) -> str:
+    """Return ``base`` or ``base-2``, ``base-3``… so labels never collide."""
+    taken = {m.name.lower() for m in machines if m.name and m.mac != ignore_mac}
+    candidate, counter = base, 2
+    while candidate.lower() in taken:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
 def _now() -> str:
     return _dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
