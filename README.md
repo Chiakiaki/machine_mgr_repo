@@ -127,6 +127,44 @@ known (`host-3613` → `ruoyu-alienware-m17-r5`); a label you chose yourself is
 never overwritten. Hostnames are slugged to 24 characters, cut at a token
 boundary, so nothing ends mid-word.
 
+## Jobs on remote machines
+
+`machine_mgr` submits and tracks jobs on any registered machine without knowing
+anything about the training code: each repo ships a `.machine_mgr.yaml`
+descriptor (schema in [docs/job-contract.md](docs/job-contract.md)) and
+`machine_mgr` does the rest.
+
+```bash
+./machine_mgr job repos  alienware-m17                 # which repos expose jobs
+./machine_mgr job list   alienware-m17 --repo bdp_benchmark
+./machine_mgr job submit alienware-m17 bdp_benchmark scripts/job_scripts/highway_native_builtin_benchmark.yaml
+./machine_mgr job submit alienware-m17 bdp_benchmark <job> --extra "--num_timesteps 160"
+./machine_mgr job submit alienware-m17 bdp_benchmark <job> --dry-run   # print the script only
+./machine_mgr job status                               # every known run
+./machine_mgr job logs   <run-id> -n 50
+./machine_mgr job cancel <run-id>
+./machine_mgr job fetch  <run-id> --artifact logs
+./machine_mgr job sync   alienware-m17 bdp_benchmark   # target git pull --ff-only
+./machine_mgr env  deploy alienware-m17 bdp_benchmark  # run the repo's redeploy.sh there
+./machine_mgr env  verify alienware-m17 bdp_benchmark
+```
+
+Runs are recorded in `data/jobs.yaml` (local index); the authoritative state is
+the per-run directory on the target (`.machine_mgr/runs/<run-id>/{command.sh,
+submitted.yaml,log,pid,exit}`), started with `setsid` so it survives ssh
+disconnects.
+
+Preflight on submit checks: local vs target git HEAD, uncommitted/unpushed local
+work, GPU free memory, and concurrent runs in the same repo. Override git with
+`--allow-head-mismatch`, everything with `--force`.
+
+Private repos clone on the target through **agent forwarding** — nothing is
+stored there:
+
+```bash
+eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
+```
+
 ## Manifest
 
 `data/machines.yaml`, one entry per machine, keyed by MAC:

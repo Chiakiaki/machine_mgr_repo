@@ -11,11 +11,14 @@ from pathlib import Path
 from . import discovery, ssh_tools
 from .discovery import ScanCache, normalize_mac
 from .registry import Machine, Registry, slugify, unique_name
+from jobs.tracker import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "data" / "machines.yaml"
 DEFAULT_SECRETS = REPO_ROOT / "data" / "secrets.yaml"
 DEFAULT_CACHE = REPO_ROOT / "data" / "cache" / "last_scan.json"
+DEFAULT_DATA_DIR = REPO_ROOT / "data"
+DEFAULT_LOCAL_PROJECT = Path.home() / "project"
 
 OK = "\033[32m●\033[0m"
 BAD = "\033[31m○\033[0m"
@@ -53,7 +56,11 @@ def fail(msg: str) -> int:
 
 class Context:
     def __init__(self, manifest: Path, subnet: str | None, timeout: int,
-                 jobs: int, no_cache: bool) -> None:
+                 jobs: int, no_cache: bool, data_dir: Path | None = None,
+                 local_project_root: str | None = None) -> None:
+        self.data_dir = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
+        self.runs = RunStore(self.data_dir / "jobs.yaml")
+        self.local_project_root = str(local_project_root or DEFAULT_LOCAL_PROJECT)
         self.registry = Registry(manifest)
         self.credentials = ssh_tools.Credentials(DEFAULT_SECRETS)
         self.subnet = subnet
@@ -524,6 +531,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=int, default=1, help="ping timeout per host (s)")
     parser.add_argument("--jobs", type=int, default=64, help="parallel ping workers")
     parser.add_argument("--no-cache", action="store_true", help="ignore the scan cache")
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR,
+                        help="where jobs.yaml / artifacts live (default: data/)")
+    parser.add_argument("--local-project-root", default=str(DEFAULT_LOCAL_PROJECT),
+                        help="this machine's clone of the repos, for HEAD comparison")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -581,6 +592,47 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("machine")
     p.add_argument("--password", help="non-interactive (prefer the prompt or env var)")
 
+    p = sub.add_parser("job", help="submit and track jobs on a machine")
+    jsub = p.add_subparsers(dest="job_command", required=True)
+    q = jsub.add_parser("repos", help="repos with a .machine_mgr.yaml on the target")
+    q.add_argument("machine")
+    q = jsub.add_parser("list", help="list jobs in a repo")
+    q.add_argument("machine")
+    q.add_argument("--repo")
+    q.add_argument("--group")
+    q = jsub.add_parser("submit", help="submit a job (detached on the target)")
+    q.add_argument("machine")
+    q.add_argument("repo")
+    q.add_argument("job")
+    q.add_argument("--extra", default="", help="extra arguments appended to the command")
+    q.add_argument("--dry-run", action="store_true", help="print the script, submit nothing")
+    q.add_argument("--allow-head-mismatch", action="store_true")
+    q.add_argument("--force", action="store_true", help="ignore preflight errors")
+    q = jsub.add_parser("status", help="run status")
+    q.add_argument("run_id", nargs="?")
+    q.add_argument("--machine")
+    q = jsub.add_parser("logs", help="tail a run log")
+    q.add_argument("run_id")
+    q.add_argument("-n", type=int, default=40)
+    q = jsub.add_parser("cancel", help="terminate a run's process group")
+    q.add_argument("run_id")
+    q = jsub.add_parser("fetch", help="copy a declared artifact back here")
+    q.add_argument("run_id")
+    q.add_argument("--artifact", default=None)
+    q.add_argument("--dest")
+    q = jsub.add_parser("sync", help="git pull the target checkout")
+    q.add_argument("machine")
+    q.add_argument("repo")
+
+    p = sub.add_parser("env", help="deploy or verify a repo environment")
+    esub = p.add_subparsers(dest="env_command", required=True)
+    q = esub.add_parser("deploy", help="run the repo's bootstrap script on the target")
+    q.add_argument("machine")
+    q.add_argument("repo")
+    q = esub.add_parser("verify", help="run the repo's verify script on the target")
+    q.add_argument("machine")
+    q.add_argument("repo")
+
     sub.add_parser("doctor", help="check local prerequisites")
     sub.add_parser("interactive", help="explicitly start the interactive menu")
 
@@ -590,7 +642,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    ctx = Context(args.manifest, args.subnet, args.timeout, args.jobs, args.no_cache)
+    ctx = Context(args.manifest, args.subnet, args.timeout, args.jobs, args.no_cache,
+                  data_dir=args.data_dir, local_project_root=args.local_project_root)
 
     if args.command in (None, "interactive"):
         try:
@@ -598,6 +651,33 @@ def main(argv: list[str] | None = None) -> int:
         except (KeyboardInterrupt, EOFError):
             print()
             return 0
+
+    if args.command == "job":
+        from jobs import cli as job_cli
+        cmd = args.job_command
+        if cmd == "repos":
+            return job_cli.cmd_repos(ctx, args.machine)
+        if cmd == "list":
+            return job_cli.cmd_list(ctx, args.machine, args.repo, args.group)
+        if cmd == "submit":
+            return job_cli.cmd_submit(ctx, args.machine, args.repo, args.job,
+                                      extra=args.extra, dry_run=args.dry_run,
+                                      allow_head_mismatch=args.allow_head_mismatch,
+                                      force=args.force)
+        if cmd == "status":
+            return job_cli.cmd_status(ctx, args.run_id, args.machine)
+        if cmd == "logs":
+            return job_cli.cmd_logs(ctx, args.run_id, args.n)
+        if cmd == "cancel":
+            return job_cli.cmd_cancel(ctx, args.run_id)
+        if cmd == "fetch":
+            return job_cli.cmd_fetch(ctx, args.run_id, args.artifact, args.dest)
+        if cmd == "sync":
+            return job_cli.cmd_sync(ctx, args.machine, args.repo)
+
+    if args.command == "env":
+        from jobs import cli as job_cli
+        return job_cli.cmd_env(ctx, args.machine, args.repo, args.env_command)
 
     if args.command == "scan":
         return cmd_scan(ctx, register=args.register)

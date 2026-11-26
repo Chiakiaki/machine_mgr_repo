@@ -69,12 +69,15 @@ def _askpass_env(password: str) -> tuple[dict, str]:
 
 def ssh(ip: str, user: str, port: int = 22, command: str | None = None,
         password: str | None = None, timeout: float = 60.0,
-        allocate_tty: bool = False) -> subprocess.CompletedProcess:
+        allocate_tty: bool = False, forward_agent: bool = False,
+        stream: bool = False) -> subprocess.CompletedProcess:
     """Run ``command`` (or open a shell) over SSH.
 
     Returns the CompletedProcess; the caller decides how to treat the code.
     """
     args = ["ssh", *_base_opts(port)]
+    if forward_agent:
+        args.append("-A")
     if password:
         args += ["-o", "BatchMode=no", "-o", "NumberOfPasswordPrompts=1"]
     elif command is not None:
@@ -92,7 +95,7 @@ def ssh(ip: str, user: str, port: int = 22, command: str | None = None,
     try:
         return subprocess.run(
             args,
-            capture_output=command is not None,
+            capture_output=command is not None and not stream,
             text=True,
             timeout=timeout,
             env=env,

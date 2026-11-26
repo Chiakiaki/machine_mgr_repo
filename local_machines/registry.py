@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - fallback path
     _yaml = None
 
 SCHEMA_FIELDS = [
-    "mac", "name", "hostname", "ssh_user", "ssh_port",
+    "mac", "name", "hostname", "ssh_user", "ssh_port", "project_root",
     "os", "os_version", "first_seen", "last_seen", "tags", "notes",
 ]
 
@@ -71,6 +71,7 @@ class Machine:
     hostname: str = ""
     ssh_user: str = ""
     ssh_port: int = 22
+    project_root: str = "~/project"
     os: str = ""
     os_version: str = ""
     first_seen: str = ""
